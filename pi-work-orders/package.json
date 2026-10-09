@@ -1,0 +1,19 @@
+{
+	"name": "pi-work-orders",
+	"version": "0.1.0",
+	"license": "MIT",
+	"type": "module",
+	"description": "本机 SQLite 工单台账：多 agent 协作的共享状态、依赖与终止依据",
+	"pi": {
+		"extensions": ["./index.ts"],
+		"skills": ["./skills"]
+	},
+	"scripts": {
+		"test": "node --test test/*.test.mjs"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	}
+}

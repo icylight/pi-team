@@ -1,0 +1,479 @@
+/**
+ * 工单台账的核心操作：增、改、依赖、校验、视图。
+ *
+ * 不 import 任何 pi 的东西。所有写操作都要 ActorContext（谁改的 + 理由），
+ * 理由是必填——状态变更不写原因，事后没人知道为什么动。
+ *
+ * 「下一步找谁」是有序候选数组：第一个是首选，后面是首选不在时的备选。
+ * 进入「在做」时收敛成单人，因为执行者只能有一个。
+ */
+
+import type { DatabaseSync } from "node:sqlite";
+import {
+	BASIS_REQUIRED,
+	LedgerError,
+	ROLES,
+	STALE_MINUTES,
+	type ActorContext,
+	type CreateInput,
+	type ListFilter,
+	type Order,
+	type OrderView,
+	type Requirement,
+	type StateRole,
+	type UpdateInput,
+	type Waiting,
+} from "./types.ts";
+import {
+	enteredStateAt,
+	getMeta,
+	idPrefixOf,
+	isTerminal,
+	isWaitingState,
+	logEvent,
+	now,
+	roleOf,
+	setMeta,
+	stateOf,
+	statesOf,
+	transitionsOf,
+} from "./schema.ts";
+
+type Row = Record<string, unknown>;
+
+/** 有序候选：去空、去重、保序，至少要有一个 */
+function normalizeActors(actors: string[] | undefined): string[] {
+	const out: string[] = [];
+	for (const raw of actors ?? []) {
+		const name = raw?.trim();
+		if (name && !out.includes(name)) out.push(name);
+	}
+	if (!out.length) throw new LedgerError("下一步找谁不能为空（至少写一个名字）");
+	return out;
+}
+
+/**
+ * 会话 key 形式的临时标识：`1423-311c`（pid-随机）或 `example-project-1423`。
+ * 拿它当下一步找谁，会话一重启就指向不存在的对象，所以写入口直接拦。
+ */
+function looksLikeSessionKey(name: string): boolean {
+	return /^\d+-[0-9a-f]{4}$/.test(name) || /[A-Za-z0-9_.-]+-\d{2,}$/.test(name);
+}
+
+function assertActorNames(names: string[]): void {
+	for (const name of names) {
+		if (looksLikeSessionKey(name)) {
+			throw new LedgerError(
+				`下一步找谁要写角色名（如 dev / qa / owner），不写会话 key：${name}。会话 key 重启即失效，库里的归属会变成死链`,
+			);
+		}
+	}
+}
+
+function toOrder(row: Row): Order {
+	return {
+		id: String(row.id),
+		title: String(row.title),
+		body: String(row.body ?? ""),
+		state: String(row.state),
+		nextActors: JSON.parse(String(row.next_actors)) as string[],
+		closingBasis: row.closing_basis == null ? null : String(row.closing_basis),
+		createdAt: String(row.created_at),
+		updatedAt: String(row.updated_at),
+		revision: Number(row.revision),
+	};
+}
+
+function mustFind(db: DatabaseSync, id: string): Order {
+	const row = db.prepare("SELECT * FROM orders WHERE id=?").get(id) as Row | undefined;
+	if (!row) throw new LedgerError(`未知工单：${id}`);
+	return toOrder(row);
+}
+
+// ── 读 ──────────────────────────────────────────────
+
+export function getOrder(db: DatabaseSync, id: string): OrderView {
+	const order = mustFind(db, id);
+	const dependsOn = (
+		db.prepare("SELECT depends_on FROM deps WHERE order_id=? ORDER BY depends_on").all(id) as Row[]
+	).map((r) => String(r.depends_on));
+	const blocks = (
+		db.prepare("SELECT order_id FROM deps WHERE depends_on=? ORDER BY order_id").all(id) as Row[]
+	).map((r) => String(r.order_id));
+	const cancelled = stateOf(db, "cancelled");
+	const staleDeps = dependsOn.filter((up) => {
+		const row = db.prepare("SELECT state FROM orders WHERE id=?").get(up) as Row | undefined;
+		return row ? String(row.state) === cancelled : false;
+	});
+	return { ...order, dependsOn, blocks, staleDeps };
+}
+
+export function listOrders(db: DatabaseSync, filter: ListFilter = {}): Order[] {
+	const states = statesOf(db);
+	const clauses: string[] = [];
+	const params: string[] = [];
+
+	// 「跳过终态」只在调用方没有明确指定状态时兜底：
+	// state 写已收口却因为默认排除终态而返回空，是查不动历史的根源。
+	if (filter.state) {
+		roleOf(db, filter.state); // 未声明的状态名直接报错，不静默返回空
+		clauses.push("state = ?");
+		params.push(filter.state);
+	} else if (!filter.history) {
+		clauses.push("state <> ? AND state <> ?");
+		params.push(states.done, states.cancelled);
+	}
+	if (filter.nextActor) {
+		clauses.push("EXISTS (SELECT 1 FROM json_each(orders.next_actors) WHERE value = ?)");
+		params.push(filter.nextActor);
+	}
+	if (filter.ready) {
+		clauses.push(
+			"NOT EXISTS (SELECT 1 FROM deps d JOIN orders up ON up.id = d.depends_on WHERE d.order_id = orders.id AND up.state <> ?)",
+		);
+		params.push(states.done);
+	}
+	const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+	const rows = db.prepare(`SELECT * FROM orders ${where} ORDER BY id`).all(...params) as Row[];
+	return rows.map(toOrder);
+}
+
+/** 依赖已全部收口、可以开工的 */
+export function readyOrders(db: DatabaseSync): Order[] {
+	return listOrders(db, { ready: true });
+}
+
+/**
+ * 空结果也要能自证：告诉调用方库里到底有多少、该怎么查。
+ * 返回 undefined 表示确实空了（没有可提示的）。
+ */
+export function listHint(db: DatabaseSync, filter: ListFilter = {}): string | undefined {
+	const hit = listOrders(db, filter).length;
+	if (hit > 0) return undefined;
+	const total = listOrders(db, { history: true }).length;
+	if (total === 0) return "库里还没有任何工单（用 orders_create 建第一条）";
+	const states = statesOf(db);
+	const closed = db
+		.prepare("SELECT count(*) AS c FROM orders WHERE state IN (?,?)")
+		.get(states.done, states.cancelled) as { c: number };
+	const open = total - closed.c;
+	const parts = [`没有匹配的工单。库里共 ${total} 条：未收口 ${open} 条`];
+	if (closed.c > 0) parts.push(`已收口/已取消 ${closed.c} 条（看它们加 history=true 或写 state=已收口）`);
+	return parts.join("，");
+}
+
+/**
+ * 在等谁动：未收口、且当前状态属于「等人接手或裁定」的单。
+ * since 取该单进入当前状态的时刻，不是最后一次改动正文的时刻。
+ */
+export function waitingOrders(db: DatabaseSync, actor?: string): Waiting[] {
+	const rows = listOrders(db, actor ? { nextActor: actor } : {}).filter((o) => isWaitingState(db, o.state));
+	return rows.map((order) => ({
+		order,
+		since: enteredStateAt(db, order.id, order.state) ?? order.updatedAt,
+	}));
+}
+
+/** 等太久还没动的：催办与扫描的判据 */
+export function staleWaiting(db: DatabaseSync, minutes = STALE_MINUTES, actor?: string): Waiting[] {
+	const cutoff = Date.now() - minutes * 60_000;
+	return waitingOrders(db, actor).filter((w) => Date.parse(w.since) < cutoff);
+}
+
+/** 可开工却没人接的：依赖已解、状态还是待认领 */
+export function idleReady(db: DatabaseSync): Order[] {
+	const claimable = statesOf(db).claimable;
+	return readyOrders(db).filter((o) => o.state === claimable);
+}
+
+/** 按下一步找谁分组（没有下一步名字的归到「（未指定）」） */
+export function groupByActor(waiting: Waiting[]): { actor: string; items: Waiting[] }[] {
+	const groups = new Map<string, Waiting[]>();
+	for (const w of waiting) {
+		const actor = w.order.nextActors[0] ?? "（未指定）";
+		const list = groups.get(actor) ?? [];
+		list.push(w);
+		groups.set(actor, list);
+	}
+	return [...groups.entries()]
+		.map(([actor, items]) => ({ actor, items }))
+		.sort((a, b) => a.actor.localeCompare(b.actor));
+}
+
+/** 挂了多久（分钟），按进当前状态的时刻算 */
+export function waitedMinutes(w: Waiting, at = Date.now()): number {
+	return Math.max(0, Math.round((at - Date.parse(w.since)) / 60_000));
+}
+
+/** 等某条的下游（递归），用于回答「这条延期会拖累谁」 */
+export function downstreamOf(db: DatabaseSync, id: string): Order[] {
+	mustFind(db, id);
+	const rows = db
+		.prepare(
+			`WITH RECURSIVE down(id) AS (
+			   SELECT order_id FROM deps WHERE depends_on = ?
+			   UNION
+			   SELECT d.order_id FROM deps d JOIN down ON d.depends_on = down.id
+			 )
+			 SELECT o.* FROM orders o JOIN down ON o.id = down.id ORDER BY o.id`,
+		)
+		.all(id) as Row[];
+	return rows.map(toOrder);
+}
+
+export function requirementOf(db: DatabaseSync): Requirement | undefined {
+	return getMeta<Requirement>(db, "requirement");
+}
+
+export function setRequirement(db: DatabaseSync, req: Omit<Requirement, "updatedAt">): Requirement {
+	const value: Requirement = { ...req, updatedAt: now() };
+	setMeta(db, "requirement", value);
+	return value;
+}
+
+// ── 写 ──────────────────────────────────────────────
+
+function nextId(db: DatabaseSync): string {
+	const prefix = idPrefixOf(db);
+	const rows = db.prepare("SELECT id FROM orders").all() as Row[];
+	let max = 0;
+	for (const row of rows) {
+		const m = new RegExp(`^${prefix}(\\d+)$`).exec(String(row.id));
+		if (m) max = Math.max(max, Number(m[1]));
+	}
+	return `${prefix}${String(max + 1).padStart(2, "0")}`;
+}
+
+function assertTransition(db: DatabaseSync, fromState: string, toState: string): void {
+	const from = roleOf(db, fromState);
+	const to = roleOf(db, toState);
+	const allowed = transitionsOf(db)[from];
+	if (!allowed.includes(to)) {
+		const allowedNames = allowed.map((r) => stateOf(db, r)).join(" / ") || "（终态）";
+		throw new LedgerError(`不合法转换：${fromState} → ${toState}（${from} 只能到 ${allowedNames}）`);
+	}
+}
+
+/** 一个角色同一时刻只能有一条在做：进入在做前检查名下有没有别的 */
+function assertSingleActive(db: DatabaseSync, id: string | null, owner: string): void {
+	const active = stateOf(db, "active");
+	const row = db
+		.prepare(
+			`SELECT id FROM orders WHERE state=? AND id IS NOT ?
+			 AND EXISTS (SELECT 1 FROM json_each(orders.next_actors) WHERE value = ?)`,
+		)
+		.get(active, id ?? null, owner) as Row | undefined;
+	if (row) throw new LedgerError(`${owner} 已有在做的一条（${String(row.id)}），先阻塞或收口再认领`);
+}
+
+function assertDepsExist(db: DatabaseSync, id: string, deps: string[]): void {
+	for (const dep of deps) {
+		if (dep === id) throw new LedgerError(`依赖不能指向自己：${dep}`);
+		mustFind(db, dep);
+	}
+}
+
+/** 加依赖前查环：从上游出发能否走回自己 */
+function assertNoCycle(db: DatabaseSync, id: string, dep: string): void {
+	const rows = db
+		.prepare(
+			`WITH RECURSIVE up(id) AS (
+			   SELECT depends_on FROM deps WHERE order_id = ?
+			   UNION
+			   SELECT d.depends_on FROM deps d JOIN up ON d.order_id = up.id
+			 )
+			 SELECT id FROM up`,
+		)
+		.all(dep) as Row[];
+	if (rows.some((r) => String(r.id) === id)) {
+		throw new LedgerError(`加这条依赖会成环：${dep} 已经（间接）依赖 ${id}`);
+	}
+}
+
+export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorContext): OrderView {
+	if (!input.title?.trim()) throw new LedgerError("标题不能为空");
+	if (!ctx.reason?.trim()) throw new LedgerError("建单也要写理由：这条为什么要建");
+	const actors = normalizeActors(input.nextActors);
+	assertActorNames(actors);
+
+	const states = statesOf(db);
+	const role: StateRole = input.role ?? "claimable";
+	if (!ROLES.includes(role)) throw new LedgerError(`未知角色：${role}`);
+	const id = input.id?.trim() || nextId(db);
+	if (db.prepare("SELECT id FROM orders WHERE id=?").get(id)) {
+		throw new LedgerError(`工单号已存在：${id}`);
+	}
+	if (role === "active" && actors.length !== 1) {
+		throw new LedgerError("在做状态的工单只能有一个执行者");
+	}
+	if (role === "active") assertSingleActive(db, id, actors[0]);
+
+	const deps = input.dependsOn ?? [];
+	assertDepsExist(db, id, deps);
+	for (const dep of deps) assertNoCycle(db, id, dep);
+
+	const stamp = now();
+	db.exec("BEGIN IMMEDIATE;");
+	try {
+		db.prepare(
+			`INSERT INTO orders(id,title,body,state,next_actors,closing_basis,created_at,updated_at,revision)
+			 VALUES(?,?,?,?,?,NULL,?,?,1)`,
+		).run(id, input.title.trim(), input.body ?? "", states[role], JSON.stringify(actors), stamp, stamp);
+		for (const dep of deps) {
+			db.prepare("INSERT INTO deps(order_id,depends_on) VALUES(?,?)").run(id, dep);
+		}
+		logEvent(db, {
+			orderId: id,
+			actor: ctx.actor,
+			kind: "create",
+			toState: states[role],
+			note: ctx.reason,
+		});
+		for (const dep of deps) {
+			logEvent(db, { orderId: id, actor: ctx.actor, kind: "dep-add", note: dep });
+		}
+		db.exec("COMMIT;");
+	} catch (error) {
+		db.exec("ROLLBACK;");
+		throw error;
+	}
+	return getOrder(db, id);
+}
+
+/**
+ * 改一条工单：字段替换、正文追加、状态转换在同一次事务里，一起成功或一起回滚。
+ *
+ * expectedRevision 在动手之前只比一次（含追加），所以「追加 + 改字段」放在同一次调用里
+ * 不会自己跟自己的版本号打架。
+ */
+export function updateOrder(
+	db: DatabaseSync,
+	id: string,
+	patch: UpdateInput,
+	ctx: ActorContext,
+	expectedRevision?: number,
+): OrderView {
+	if (!ctx.reason?.trim()) throw new LedgerError("改状态或范围必须写理由");
+	const old = mustFind(db, id);
+	if (expectedRevision != null && old.revision !== expectedRevision) {
+		throw new LedgerError(
+			`版本冲突：库里是 revision=${old.revision}，你手上是 ${expectedRevision}；请重读工单再改`,
+		);
+	}
+
+	// 空串或全空白一律当作「没传」：调用方习惯用 "" 表示这次不改这个字段，
+	// 不能让它变成「把正文清空」。
+	const replacement = patch.body?.trim() ? patch.body : undefined;
+	const section = patch.appendBody?.trim();
+	if (patch.appendBody != null && !section) throw new LedgerError("追加内容不能为空");
+
+	const targetState = patch.state ?? old.state;
+	const nextRole = roleOf(db, targetState);
+	// 认领＝把状态推到「在做」；这时执行者就是操作者本人，不用再手传
+	const claiming = nextRole === "active" && old.state !== targetState;
+	const nextActors = patch.nextActors
+		? normalizeActors(patch.nextActors)
+		: claiming
+			? [ctx.actor]
+			: old.nextActors;
+	if (patch.nextActors) assertActorNames(nextActors);
+
+	// 先替换（如果给了），再拼接追加段：追加永远不覆盖旧句
+	const replaced = replacement ?? old.body;
+	const nextBody = section ? (replaced.trim() ? `${replaced.trimEnd()}\n\n${section}\n` : `${section}\n`) : replaced;
+
+	const next = {
+		title: patch.title?.trim() || old.title,
+		body: nextBody,
+		state: targetState,
+		nextActors,
+		closingBasis: patch.closingBasis ?? old.closingBasis,
+	};
+
+	if (next.state !== old.state) assertTransition(db, old.state, next.state);
+	if (nextRole === "active") {
+		if (nextActors.length !== 1) {
+			throw new LedgerError("在做状态的工单只能有一个执行者（换人就给一个名字）");
+		}
+		if (next.state !== old.state || nextActors[0] !== old.nextActors[0]) {
+			assertSingleActive(db, id, nextActors[0]);
+		}
+	}
+	if (BASIS_REQUIRED.includes(nextRole) && !next.closingBasis?.trim()) {
+		throw new LedgerError(
+			nextRole === "done" ? "结单必须给终止依据（证据指针）" : "取消必须给理由或取代它的单号",
+		);
+	}
+
+	db.exec("BEGIN IMMEDIATE;");
+	try {
+		db.prepare(
+			`UPDATE orders SET title=?, body=?, state=?, next_actors=?, closing_basis=?,
+			 updated_at=?, revision=revision+1 WHERE id=?`,
+		).run(
+			next.title,
+			next.body,
+			next.state,
+			JSON.stringify(nextActors),
+			next.closingBasis,
+			now(),
+			id,
+		);
+		const stateChanged = next.state !== old.state;
+		if (stateChanged) {
+			logEvent(db, {
+				orderId: id,
+				actor: ctx.actor,
+				kind: "state",
+				fromState: old.state,
+				toState: next.state,
+				note: ctx.reason,
+			});
+		} else if (next.body !== old.body || next.title !== old.title) {
+			logEvent(db, { orderId: id, actor: ctx.actor, kind: "field", note: ctx.reason });
+		}
+		db.exec("COMMIT;");
+	} catch (error) {
+		db.exec("ROLLBACK;");
+		throw error;
+	}
+	return getOrder(db, id);
+}
+
+/** 范围修订：追加一段，不覆盖旧句（旧句留在正文里，可追溯） */
+export function appendBody(
+	db: DatabaseSync,
+	id: string,
+	section: string,
+	ctx: ActorContext,
+): OrderView {
+	return updateOrder(db, id, { appendBody: section }, { ...ctx, reason: ctx.reason || "正文追加修订" });
+}
+
+export function addDep(db: DatabaseSync, id: string, dep: string, ctx: ActorContext): OrderView {
+	if (!ctx.reason?.trim()) throw new LedgerError("加依赖要写理由");
+	mustFind(db, id);
+	assertDepsExist(db, id, [dep]);
+	if (db.prepare("SELECT 1 FROM deps WHERE order_id=? AND depends_on=?").get(id, dep)) {
+		throw new LedgerError(`依赖已存在：${id} 依赖 ${dep}`);
+	}
+	assertNoCycle(db, id, dep);
+	db.prepare("INSERT INTO deps(order_id,depends_on) VALUES(?,?)").run(id, dep);
+	logEvent(db, { orderId: id, actor: ctx.actor, kind: "dep-add", note: dep });
+	return getOrder(db, id);
+}
+
+export function removeDep(db: DatabaseSync, id: string, dep: string, ctx: ActorContext): OrderView {
+	if (!ctx.reason?.trim()) throw new LedgerError("删依赖要写理由");
+	if (!db.prepare("SELECT 1 FROM deps WHERE order_id=? AND depends_on=?").get(id, dep)) {
+		throw new LedgerError(`没有这条依赖：${id} → ${dep}`);
+	}
+	db.prepare("DELETE FROM deps WHERE order_id=? AND depends_on=?").run(id, dep);
+	logEvent(db, { orderId: id, actor: ctx.actor, kind: "dep-remove", note: dep });
+	return getOrder(db, id);
+}
+
+/** 取消一条时，下游会失去前置。这里是提示用的计数，不做自动处置 */
+export function countBlockedDownstream(db: DatabaseSync, id: string): number {
+	return downstreamOf(db, id).filter((o) => !isTerminal(db, o.state)).length;
+}

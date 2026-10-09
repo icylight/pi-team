@@ -1,0 +1,725 @@
+/**
+ * pi-peer 传输层（纯 Node，不依赖 pi API，可单独测试）
+ *
+ * 目录布局（root 默认 ~/.pi/peers，按工作目录分桶）：
+ *
+ *   <root>/<cwdKey>/
+ *     members/<sessionKey>.json        会话注册表（含心跳，用于发现与存活判断）
+ *     pending/<sessionKey>/*.json      未投递消息（收件箱）
+ *     delivered/<sessionKey>/*.json    已投递存档（供回看，且有界修剪）
+ *     outbox/<sessionKey>/*.json       自己发出的消息（回复链追踪）
+ *
+ * 设计要点：
+ * - 原子写：先写临时文件再 rename，避免读到半截 JSON
+ * - 先搬再读：投递时先把文件 rename 到 delivered，杜绝重复投递
+ * - 无守护进程：每个会话只写自己的收件箱和注册表，崩溃自愈靠 pid + lastSeen
+ *
+ * AI(TAG): [跨项目寻址与投递] 桶是唯一真相：跨项目发现靠扫 root 下所有桶，投递写目标的桶。
+ * 不维护全局注册表（会多一处会和桶不同步的状态），也不改接收侧的收件箱监听。
+ */
+
+import { createHash, randomBytes } from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+/** 目录权限：消息正文可能带着项目内容，收口给本人可见 */
+const DIR_MODE = 0o700;
+
+/** 心跳超时（毫秒）：超过即视为离线 */
+export const STALE_MS = 30_000;
+/** 单条消息正文上限（字符） */
+export const MAX_TEXT = 32_000;
+/** 单次投递最多处理的消息数，避免积压时一次性灌爆上下文 */
+export const MAX_BATCH = 20;
+/** delivered 目录保留条数 */
+export const HISTORY_KEEP = 200;
+
+/** 会话 key 合法字符集：用于路径拼接，防目录穿越 */
+const KEY_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const ROLE_RE = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+const ROLE_SLOT_LIMIT = 10_000;
+
+interface RoleClaim {
+	role: string;
+	name: string;
+	key: string;
+	pid: number;
+	claimedAt: number;
+}
+
+export interface Member {
+	/** 会话唯一标识（进程内生成，形如 38412-a1b2） */
+	key: string;
+	/** 展示名，可被 /peer-name 修改 */
+	name: string;
+	/** 项目标签，跨项目寻址用；注册时算好写进来，发现方不必读对方配置 */
+	project?: string;
+	/** 基础角色，例如 dev；同角色实例共享这一个角色值 */
+	role?: string;
+	/** 角色实例名，例如 dev、dev-2；用于释放认领槽位 */
+	roleSlot?: string;
+	/** 模型标识，形如 deepseek/deepseek-flash */
+	model: string;
+	pid: number;
+	cwd: string;
+	sessionFile?: string;
+	startedAt: number;
+	lastSeen: number;
+	/** 正在跑一轮（agent_start 到 agent_end 之间）。派工方据此避开，不打断进行中的工作 */
+	busy?: boolean;
+	/** 这一轮什么时候开始的：busy 卡住（中断没触发 agent_end）时按超时兜底 */
+	busySince?: number;
+}
+
+/** 忙超过这个时长就当它卡住了：不再信任 busy，避免一次异常让该会话永远收不到消息 */
+export const BUSY_STALE_MS = 30 * 60_000;
+
+export interface PeerMessage {
+	id: string;
+	/** 发送方 key */
+	from: string;
+	fromName: string;
+	fromModel?: string;
+	/** 接收方 key */
+	to: string;
+	/** 会话线索：回复时继承 */
+	thread?: string;
+	/** 回复目标消息 id */
+	replyTo?: string;
+	text: string;
+	ts: number;
+}
+
+/** 成员 + 它所在的桶：跨项目投递要知道往哪个目录写 */
+export interface ScopedMember {
+	member: Member;
+	/** 桶的绝对路径；扫描时拿到，不由 cwd 反算（目录删除或改名后反算会对不上） */
+	bucket: string;
+	project: string;
+	/** 进程还在且心跳新鲜 */
+	live: boolean;
+}
+
+export type ResolveResult =
+	| { ok: true; member: Member; bucket: string; live: boolean }
+	| {
+			ok: false;
+			reason: "self" | "none" | "ambiguous" | "offline" | "busy";
+			candidates: Member[];
+			/** 仅跨项目解析失败时给：本机在线的项目标签，用于「没有这个项目」的提示 */
+			projects?: string[];
+	  };
+
+/**
+ * 项目标签：跨项目寻址的前缀。
+ *
+ * 斜杠、空白、控制字符换成 - —— 寻址靠首个斜杠分词，标签里不能带斜杠。
+ * 没给 group.name 就用目录名；清完为空则退为 session。
+ */
+export function projectLabel(raw: string | undefined, cwd: string): string {
+	const source = raw?.trim() || path.basename(cwd);
+	const cleaned = source.replace(/[/\s\u0000-\u001f]+/g, "-").replace(/^-+|-+$/g, "");
+	return cleaned.slice(0, 32) || "session";
+}
+
+/** 把工作目录映射成稳定的分桶名：可读前缀 + 路径哈希 */
+export function cwdKey(cwd: string): string {
+	let real = cwd;
+	try {
+		real = fs.realpathSync(cwd);
+	} catch {
+		// 目录不存在时退回原值
+	}
+	const base =
+		path
+			.basename(real)
+			.replace(/[^A-Za-z0-9._-]+/g, "-")
+			.slice(0, 24) || "root";
+	const hash = createHash("sha1").update(real).digest("hex").slice(0, 8);
+	return `${base}-${hash}`;
+}
+
+/** 生成本次会话的 key（进程号 + 随机短串，避免 reload 后与旧记录撞车） */
+export function newSessionKey(pid = process.pid): string {
+	return `${pid}-${randomBytes(2).toString("hex")}`;
+}
+
+/** 生成消息 id */
+export function newMessageId(): string {
+	return `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+}
+
+function writeAtomic(file: string, data: unknown): void {
+	const tmp = `${file}.tmp-${randomBytes(3).toString("hex")}`;
+	fs.writeFileSync(tmp, JSON.stringify(data, null, "\t"), "utf8");
+	fs.renameSync(tmp, file);
+}
+
+function readJson<T>(file: string): T | undefined {
+	try {
+		return JSON.parse(fs.readFileSync(file, "utf8")) as T;
+	} catch {
+		return undefined;
+	}
+}
+
+function pidAlive(pid: number): boolean {
+	if (!Number.isFinite(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		// EPERM 说明进程存在但属于别的用户
+		return (err as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** 文件名时间戳前缀，保证字典序 = 时间序；同毫秒内用进程内自增序号消歧 */
+let stampSeq = 0;
+function stamp(ts: number): string {
+	stampSeq = (stampSeq + 1) % 1000;
+	return `${String(ts).padStart(16, "0")}-${String(stampSeq).padStart(3, "0")}`;
+}
+
+export class PeerStore {
+	/** 共享根目录：跨项目扫描要遍历它下面的桶 */
+	readonly root: string;
+	/** 当前工作目录对应的桶 */
+	readonly dir: string;
+
+	constructor(root: string, cwd: string) {
+		this.root = root;
+		this.dir = path.join(root, cwdKey(cwd));
+	}
+
+	get membersDir(): string {
+		return path.join(this.dir, "members");
+	}
+
+	get roleClaimsDir(): string {
+		return path.join(this.dir, "role-claims");
+	}
+
+	pendingDir(key: string): string {
+		assertKey(key);
+		return path.join(this.dir, "pending", key);
+	}
+
+	deliveredDir(key: string): string {
+		assertKey(key);
+		return path.join(this.dir, "delivered", key);
+	}
+
+	outboxDir(key: string): string {
+		assertKey(key);
+		return path.join(this.dir, "outbox", key);
+	}
+
+	/** 建立本次会话需要的目录 */
+	ensure(key: string): void {
+		for (const d of [this.membersDir, this.pendingDir(key), this.deliveredDir(key), this.outboxDir(key)]) {
+			fs.mkdirSync(d, { recursive: true, mode: DIR_MODE });
+		}
+	}
+
+	/** 认领角色实例名：第一个用基础角色，后续追加 -2、-3…… */
+	claimRoleName(role: string, key: string, pid: number, preferred?: string): string {
+		assertRole(role);
+		assertKey(key);
+		fs.mkdirSync(this.roleClaimsDir, { recursive: true, mode: DIR_MODE });
+
+		const candidates: string[] = [];
+		if (preferred && isRoleSlot(role, preferred)) candidates.push(preferred);
+		for (let index = 1; index <= ROLE_SLOT_LIMIT; index++) {
+			const name = roleSlotName(role, index);
+			if (!candidates.includes(name)) candidates.push(name);
+		}
+
+		for (const name of candidates) {
+			const file = this.roleClaimFile(name);
+			const temp = path.join(this.roleClaimsDir, `.${name}.${key}-${randomBytes(3).toString("hex")}.tmp`);
+			try {
+				const claim: RoleClaim = { role, name, key, pid, claimedAt: Date.now() };
+				writeAtomic(temp, claim);
+				fs.linkSync(temp, file);
+				try {
+					fs.unlinkSync(temp);
+				} catch {
+					// 认领已完成，临时文件清理失败不影响槽位归属。
+				}
+				return name;
+			} catch (err) {
+				try {
+					fs.unlinkSync(temp);
+				} catch {
+					// 临时文件可能已被上面的清理步骤移除。
+				}
+				if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+				const claim = readJson<RoleClaim>(file);
+				if (
+					!claim ||
+					claim.role !== role ||
+					claim.name !== name ||
+					(!isLiveRoleClaim(claim) && !this.isLiveRoleMember(claim))
+				) {
+					try {
+						fs.unlinkSync(file);
+					} catch {
+						// 另一个进程可能刚好完成了清理，继续尝试下一个槽位。
+					}
+				}
+			}
+		}
+
+		throw new Error(`角色 ${role} 的实例名已达到上限 ${ROLE_SLOT_LIMIT}`);
+	}
+
+	/** 释放本会话认领的角色实例名，避免下次启动一直从更大序号开始。 */
+	releaseRoleName(role: string, name: string, key: string): void {
+		assertRole(role);
+		if (!isRoleSlot(role, name)) return;
+		const file = this.roleClaimFile(name);
+		const claim = readJson<RoleClaim>(file);
+		if (claim?.key !== key) return;
+		try {
+			fs.unlinkSync(file);
+		} catch {
+			// 进程退出时槽位可能已被清理。
+		}
+	}
+
+	/** 注册（或刷新）成员 */
+	register(member: Member): void {
+		assertKey(member.key);
+		fs.mkdirSync(this.membersDir, { recursive: true, mode: DIR_MODE });
+		writeAtomic(path.join(this.membersDir, `${member.key}.json`), member);
+	}
+
+	/** 心跳：只更新时间戳 */
+	heartbeat(member: Member): void {
+		member.lastSeen = Date.now();
+		this.register(member);
+		if (member.role && member.roleSlot) this.touchRoleClaim(member.role, member.roleSlot, member.key);
+	}
+
+	unregister(key: string): void {
+		try {
+			fs.unlinkSync(path.join(this.membersDir, `${key}.json`));
+		} catch {
+			// 已经被清理过
+		}
+	}
+
+	/** 读一个桶的成员表，顺带清死成员（pid 死或心跳过期） */
+	private readBucket(bucket: string): ScopedMember[] {
+		const membersDir = path.join(bucket, "members");
+		let files: string[];
+		try {
+			files = fs.readdirSync(membersDir);
+		} catch {
+			return [];
+		}
+
+		const now = Date.now();
+		const live: ScopedMember[] = [];
+		const stale: ScopedMember[] = [];
+
+		for (const f of files) {
+			if (!f.endsWith(".json")) continue;
+			const m = readJson<Member>(path.join(membersDir, f));
+			if (!m || typeof m.key !== "string" || !KEY_RE.test(m.key)) {
+				stale.push({
+					member: m ?? ({ key: f.replace(/\.json$/, "") } as Member),
+					bucket,
+					project: projectLabel(undefined, m?.cwd ?? bucket),
+					live: false,
+				});
+				continue;
+			}
+			const fresh = pidAlive(m.pid) && now - (m.lastSeen ?? 0) < STALE_MS;
+			(fresh ? live : stale).push({
+				member: m,
+				bucket,
+				// 老成员文件没有 project（加字段之前注册的）→ 回退目录名
+				project: m.project ?? projectLabel(undefined, m.cwd),
+				live: fresh,
+			});
+		}
+
+		for (const s of stale) {
+			// 修掉读到的坏数据；删不掉就算了（可能已被别的会话清掉）
+			if (s.member.key && KEY_RE.test(s.member.key)) {
+				try {
+					fs.unlinkSync(path.join(membersDir, `${s.member.key}.json`));
+				} catch {
+					// ignore
+				}
+			}
+		}
+
+		return [...live, ...stale].sort((a, b) => (a.member.startedAt ?? 0) - (b.member.startedAt ?? 0));
+	}
+
+	/** 本项目桶的成员，带存活标记 */
+	listScoped(opts: { includeStale?: boolean } = {}): ScopedMember[] {
+		return this.readBucket(this.dir).filter((s) => opts.includeStale || s.live);
+	}
+
+	/** 列出存活成员（顺带清理过期注册表） */
+	listMembers(opts: { includeStale?: boolean } = {}): Member[] {
+		return this.listScoped(opts).map((s) => s.member);
+	}
+
+	/** 扫全部桶：有谁在、在哪个桶、属于哪个项目 */
+	listAllMembers(opts: { includeStale?: boolean } = {}): ScopedMember[] {
+		let names: string[];
+		try {
+			names = fs.readdirSync(this.root);
+		} catch {
+			return [];
+		}
+
+		const out: ScopedMember[] = [];
+		for (const name of names) {
+			const bucket = path.join(this.root, name);
+			try {
+				if (!fs.statSync(bucket).isDirectory()) continue;
+			} catch {
+				continue;
+			}
+			for (const s of this.readBucket(bucket)) {
+				if (s.live || opts.includeStale) out.push(s);
+			}
+		}
+		return out;
+	}
+
+	/** 从候选中挑唯一目标：key / 名字 / name#pid / pid / 前缀 */
+	private pick(candidates: ScopedMember[], query: string, selfKey: string): ResolveResult {
+		const others = candidates.filter((s) => s.member.key !== selfKey);
+		const hit = (s: ScopedMember): ResolveResult => ({ ok: true, member: s.member, bucket: s.bucket, live: s.live });
+
+		const exactKey = others.find((s) => s.member.key === query);
+		if (exactKey) return hit(exactKey);
+
+		const lower = query.toLowerCase();
+		const exactName = others.filter((s) => s.member.name.toLowerCase() === lower);
+		if (exactName.length === 1) return hit(exactName[0]);
+
+		// name#pid
+		const hash = /^(.+)#(\d+)$/.exec(query);
+		if (hash) {
+			const byHash = others.find(
+				(s) => s.member.name.toLowerCase() === hash[1].toLowerCase() && String(s.member.pid) === hash[2],
+			);
+			if (byHash) return hit(byHash);
+		}
+
+		// pid
+		if (/^\d+$/.test(query)) {
+			const byPid = others.filter((s) => String(s.member.pid) === query);
+			if (byPid.length === 1) return hit(byPid[0]);
+		}
+
+		// 前缀（key 或 name）
+		const prefixed = others.filter(
+			(s) => s.member.key.toLowerCase().startsWith(lower) || s.member.name.toLowerCase().startsWith(lower),
+		);
+		if (prefixed.length === 1) return hit(prefixed[0]);
+		if (prefixed.length > 1) return { ok: false, reason: "ambiguous", candidates: prefixed.map((s) => s.member) };
+
+		return { ok: false, reason: "none", candidates: others.map((s) => s.member) };
+	}
+
+	/**
+	 * 解析目标：只在本项目桶里找。支持 name / name#pid / key / key 前缀 / pid
+	 *
+	 * 只认在线的：写进一个已经死掉的会话 key，信会永远躺在那里没人取，
+	 * 发件人却以为投出去了。名字能对上但人不在线时报 offline，由调用方决定怎么处理。
+	 */
+	resolve(query: string, selfKey: string): ResolveResult {
+		const q = query.trim().replace(/^@/, "");
+		if (!q) return { ok: false, reason: "none", candidates: [] };
+
+		const members = this.readBucket(this.dir);
+		if (members.some((s) => s.member.key === selfKey && matchesQuery(s.member, q))) {
+			return { ok: false, reason: "self", candidates: [] };
+		}
+		return this.pickLive(members, q, selfKey);
+	}
+
+	/** 只在空闲的在线成员里解析：派工走它，避免 steer 插进别人正在做的事 */
+	resolveIdle(query: string, selfKey: string): ResolveResult {
+		const q = query.trim().replace(/^@/, "");
+		if (!q) return { ok: false, reason: "none", candidates: [] };
+		const members = this.readBucket(this.dir);
+		if (members.some((s) => s.member.key === selfKey && matchesQuery(s.member, q))) {
+			return { ok: false, reason: "self", candidates: [] };
+		}
+		return this.pickLive(members, q, selfKey, true);
+	}
+
+	/**
+	 * 解析跨项目目标：按 (项目标签, 名字) 在全机范围找。
+	 *
+	 * 项目标签不存在与名字不存在是两种错，提示不同，所以失败时把在线项目也带回去。
+	 */
+	resolveScoped(project: string, name: string, selfKey: string): ResolveResult {
+		const q = name.trim().replace(/^@/, "");
+		const all = this.listAllMembers({ includeStale: true });
+
+		const self = all.find((s) => s.member.key === selfKey);
+		if (self && self.project === project && matchesQuery(self.member, q)) {
+			return { ok: false, reason: "self", candidates: [] };
+		}
+
+		const inProject = all.filter((s) => s.project === project);
+		if (!inProject.length) {
+			const projects = [...new Set(all.filter((s) => s.live).map((s) => s.project))].sort();
+			return { ok: false, reason: "none", candidates: [], projects };
+		}
+		return this.pickLive(inProject, q, selfKey);
+	}
+
+	/**
+	 * 只在在线的成员里选：名字能对上但人不在线时报 offline，不把信写进死信箱。
+	 * skipBusy=true 时，正在跑一轮的会话也当不可投（派工用；手动发消息不受限）。
+	 */
+	private pickLive(candidates: ScopedMember[], query: string, selfKey: string, skipBusy = false): ResolveResult {
+		const usable = candidates.filter((s) => s.live && !(skipBusy && isBusy(s.member)));
+		const hit = this.pick(usable, query, selfKey);
+		if (!hit.ok && hit.reason === "none" && skipBusy) {
+			// 人在线但在忙：与「离线」分开报，调用方好区分是等一等还是换人
+			const busyOnly = this.pick(
+				candidates.filter((s) => s.live && isBusy(s.member)),
+				query,
+				selfKey,
+			);
+			if (busyOnly.ok) return { ok: false, reason: "busy", candidates: [busyOnly.member] };
+			if (busyOnly.reason === "ambiguous") return { ok: false, reason: "busy", candidates: busyOnly.candidates };
+		}
+		if (hit.ok || hit.reason !== "none") return hit;
+
+		const offline = this.pick(
+			candidates.filter((s) => !s.live),
+			query,
+			selfKey,
+		);
+		if (offline.ok) return { ok: false, reason: "offline", candidates: [offline.member] };
+		if (offline.reason === "ambiguous") return { ok: false, reason: "offline", candidates: offline.candidates };
+		return hit;
+	}
+
+	/** 投递：写入目标收件箱（原子落盘）。targetBucket 缺省写本项目桶 */
+	send(msg: PeerMessage, targetBucket: string = this.dir): void {
+		assertKey(msg.to);
+		const dir = path.join(targetBucket, "pending", msg.to);
+		fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+		const text = msg.text.slice(0, MAX_TEXT);
+		const payload: PeerMessage = { ...msg, text };
+		writeAtomic(path.join(dir, `${stamp(payload.ts)}-${payload.id}.json`), payload);
+	}
+
+	/**
+	 * 代外部调用方（工单台账的扫描器、其他扩展）投一条给某个名字。
+	 *
+	 * 只投在线的：离线就如实回报，不写进没人取的收件箱——信躺在死 key 里没人知道，
+	 * 发件方却以为已经送达。这是与「会话自己发消息」的关键区别。
+	 */
+	deliverTo(
+		target: string,
+		message: { from: string; fromName: string; text: string },
+		options: { idleOnly?: boolean } = {},
+	): { ok: true; to: string; id: string } | { ok: false; reason: string; detail: string } {
+		const resolved = options.idleOnly ? this.resolveIdle(target, "") : this.resolve(target, "");
+		if (!resolved.ok) {
+			const who = resolved.candidates.map((m) => m.name).join("、");
+			const detail =
+				resolved.reason === "offline"
+					? `${who || target} 不在线`
+					: resolved.reason === "busy"
+						? `${who || target} 正在跑一轮，跳过`
+						: resolved.reason === "ambiguous"
+							? `名字不唯一：${who}`
+							: `找不到「${target}」`;
+			return { ok: false, reason: resolved.reason, detail };
+		}
+		const id = newMessageId();
+		this.send(
+			{
+				id,
+				from: message.from,
+				fromName: message.fromName,
+				to: resolved.member.key,
+				thread: id,
+				text: message.text,
+				ts: Date.now(),
+			},
+			resolved.bucket,
+		);
+		return { ok: true, to: resolved.member.name, id };
+	}
+
+	/** 取走收件箱：先 rename 再读，保证同一条消息只会被投递一次 */
+	drain(key: string): PeerMessage[] {
+		const dir = this.pendingDir(key);
+		let files: string[];
+		try {
+			files = fs
+				.readdirSync(dir)
+				.filter((f) => f.endsWith(".json"))
+				.sort();
+		} catch {
+			return [];
+		}
+
+		const delivered = this.deliveredDir(key);
+		fs.mkdirSync(delivered, { recursive: true, mode: DIR_MODE });
+
+		const out: PeerMessage[] = [];
+		for (const f of files.slice(0, MAX_BATCH)) {
+			const from = path.join(dir, f);
+			const to = path.join(delivered, f);
+			try {
+				fs.renameSync(from, to);
+			} catch {
+				// 已被另一次 drain 取走
+				continue;
+			}
+			const msg = readJson<PeerMessage>(to);
+			if (msg && typeof msg.text === "string" && typeof msg.from === "string") out.push(msg);
+		}
+		return out;
+	}
+
+	/** 已投递历史（新→旧），用于回看与回复链追踪 */
+	history(key: string, limit = 20): PeerMessage[] {
+		let files: string[];
+		try {
+			files = fs.readdirSync(this.deliveredDir(key)).filter((f) => f.endsWith(".json"));
+		} catch {
+			return [];
+		}
+		files.sort().reverse();
+		const out: PeerMessage[] = [];
+		for (const f of files.slice(0, Math.max(1, limit))) {
+			const msg = readJson<PeerMessage>(path.join(this.deliveredDir(key), f));
+			if (msg) out.push(msg);
+		}
+		return out;
+	}
+
+	/** 记录自己发出的消息，便于追踪会话线索与回复链 */
+	logSent(key: string, msg: PeerMessage): void {
+		assertKey(key);
+		const dir = this.outboxDir(key);
+		fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+		writeAtomic(path.join(dir, `${stamp(msg.ts)}-${msg.id}.json`), msg);
+	}
+
+	/** 查找某条（自己收到或发出的）消息，用于继承 thread */
+	findMessage(key: string, id: string): PeerMessage | undefined {
+		if (!id) return undefined;
+		for (const dir of [this.deliveredDir(key), this.outboxDir(key)]) {
+			let files: string[];
+			try {
+				files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+			} catch {
+				continue;
+			}
+			files.sort().reverse();
+			for (const f of files) {
+				if (f.includes(id)) {
+					const msg = readJson<PeerMessage>(path.join(dir, f));
+					if (msg) return msg;
+				}
+			}
+		}
+		return undefined;
+	}
+
+	/** 有界修剪：收件箱与发件箱各保留最近 keep 条 */
+	prune(key: string, keep = HISTORY_KEEP): void {
+		for (const dir of [this.deliveredDir(key), this.outboxDir(key)]) {
+			let files: string[];
+			try {
+				files = fs
+					.readdirSync(dir)
+					.filter((f) => f.endsWith(".json"))
+					.sort();
+			} catch {
+				continue;
+			}
+			for (const f of files.slice(0, Math.max(0, files.length - keep))) {
+				try {
+					fs.unlinkSync(path.join(dir, f));
+				} catch {
+					// ignore
+				}
+			}
+		}
+	}
+
+	private roleClaimFile(name: string): string {
+		return path.join(this.roleClaimsDir, `${name}.json`);
+	}
+
+	private isLiveRoleMember(claim: RoleClaim): boolean {
+		const member = readJson<Member>(path.join(this.membersDir, `${claim.key}.json`));
+		return Boolean(
+			member &&
+				member.pid === claim.pid &&
+				member.role === claim.role &&
+				member.roleSlot === claim.name &&
+				Date.now() - member.lastSeen < STALE_MS &&
+				pidAlive(member.pid),
+		);
+	}
+
+	private touchRoleClaim(role: string, name: string, key: string): void {
+		const file = this.roleClaimFile(name);
+		const claim = readJson<RoleClaim>(file);
+		if (!claim || claim.role !== role || claim.name !== name || claim.key !== key) return;
+		writeAtomic(file, { ...claim, claimedAt: Date.now() });
+	}
+}
+
+/** 忙：声明了 busy 且在超时窗口内；卡住的 busy 不算，否则一次异常就永远收不到派工 */
+export function isBusy(member: Member): boolean {
+	return Boolean(member.busy) && Date.now() - (member.busySince ?? 0) < BUSY_STALE_MS;
+}
+
+function assertKey(key: string): void {
+	if (!KEY_RE.test(key)) throw new Error(`非法会话 key: ${JSON.stringify(key)}`);
+}
+
+/** 这个标识是不是就指这个成员：用于认「目标是自己」 */
+function matchesQuery(member: Member, query: string): boolean {
+	return member.key === query || member.name.toLowerCase() === query.toLowerCase();
+}
+
+function assertRole(role: string): void {
+	if (!ROLE_RE.test(role)) throw new Error(`非法角色名: ${JSON.stringify(role)}`);
+}
+
+function roleSlotName(role: string, index: number): string {
+	return index === 1 ? role : `${role}-${index}`;
+}
+
+function isRoleSlot(role: string, name: string): boolean {
+	if (name === role) return true;
+	const suffix = name.slice(role.length + 1);
+	return name.startsWith(`${role}-`) && /^\d+$/.test(suffix) && Number(suffix) >= 2;
+}
+
+function isLiveRoleClaim(claim: RoleClaim): boolean {
+	return (
+		ROLE_RE.test(claim.role) &&
+		isRoleSlot(claim.role, claim.name) &&
+		KEY_RE.test(claim.key) &&
+		Number.isSafeInteger(claim.pid) &&
+		claim.pid > 0 &&
+		Date.now() - claim.claimedAt < STALE_MS &&
+		pidAlive(claim.pid)
+	);
+}

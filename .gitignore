@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+*.log
+*.tgz
+.env
+.env.*
+.pi/
+.work-orders/
+*.sqlite*
+peers/
+tmp/

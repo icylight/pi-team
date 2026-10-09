@@ -1,0 +1,44 @@
+{
+  "name": "pi-team",
+  "version": "0.1.0",
+  "description": "pi 多会话协作工具：角色与消息互通、本机 SQLite 工单台账",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/icylight/pi-team.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "multi-agent",
+    "peer",
+    "work-orders"
+  ],
+  "files": [
+    "pi-peer/",
+    "pi-work-orders/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./pi-peer/index.ts",
+      "./pi-work-orders/index.ts"
+    ],
+    "skills": [
+      "./pi-work-orders/skills"
+    ]
+  },
+  "scripts": {
+    "test": "node --test --test-reporter=tap pi-peer/test/*.test.ts pi-work-orders/test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
