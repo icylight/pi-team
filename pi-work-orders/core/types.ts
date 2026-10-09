@@ -177,10 +177,18 @@ export interface ListFilter {
 	ready?: boolean;
 }
 
-/** 一条「在等某人动」的记录：等谁、等了多久 */
+export interface DependencyBlocker {
+	id: string;
+	state: string;
+	cancelled: boolean;
+}
+
+/** 等处理、等依赖与取消依赖待裁定；分类不改变工单状态。 */
 export interface Waiting {
 	order: Order;
-	/** 从这一刻起在等（该单进入当前状态的时刻） */
+	kind: "action" | "dependency" | "decision";
+	dependencies: DependencyBlocker[];
+	/** 可处理起点；等依赖时仅记录状态进入时刻，不计催办。 */
 	since: string;
 }
 

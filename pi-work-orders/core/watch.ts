@@ -116,7 +116,7 @@ export function buildWatchText(
 ): { text: string; state: WatchState } {
 	const now = options.now ?? Date.now();
 	const repeatMs = options.config.repeatMinutes * 60_000;
-	const stale = staleWaiting(db, options.config.staleMinutes);
+	const stale = staleWaiting(db, options.config.staleMinutes, undefined, now);
 	const state: WatchState = {};
 	const due: Waiting[] = [];
 

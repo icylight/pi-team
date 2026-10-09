@@ -340,7 +340,7 @@ export default function (pi: ExtensionAPI) {
 					const rows = listOrders(db, filter);
 					const heading = filter.state ? `状态：${filter.state}` : filter.history ? "全部" : "未收口";
 					const hint = rows.length ? undefined : listHint(db, filter);
-					return [formatList(rows, heading), hint].filter(Boolean).join("\n");
+					return [formatList(rows, heading, waitingOrders(db)), hint].filter(Boolean).join("\n");
 				}),
 			);
 		},
@@ -604,8 +604,8 @@ export default function (pi: ExtensionAPI) {
 					if (mode === "stale") return renderStale(db, { staleMinutes: staleMinutes() });
 					if (mode === "mine") return formatWaiting(waitingOrders(db, actorName()), "等你的");
 					if (mode === "doctor") return renderDoctor(db);
-					if (mode === "all") return formatList(listOrders(db, { history: true }), "全部");
-					return formatList(listOrders(db), "未收口");
+					if (mode === "all") return formatList(listOrders(db, { history: true }), "全部", waitingOrders(db));
+					return formatList(listOrders(db), "未收口", waitingOrders(db));
 				});
 				ctx.ui.notify(text, "info");
 			} catch (error) {

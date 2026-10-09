@@ -1,6 +1,8 @@
 /**
  * 工单台账的核心操作：增、改、依赖、校验、视图。
  *
+ * AI(TAG): [工单等待] 区分可处理等待、依赖等待与取消依赖的人工裁定。
+ *
  * 不 import 任何 pi 的东西。所有写操作都要 ActorContext（谁改的 + 理由），
  * 理由是必填——状态变更不写原因，事后没人知道为什么动。
  *
@@ -25,7 +27,6 @@ import {
 	type Waiting,
 } from "./types.ts";
 import {
-	enteredStateAt,
 	getMeta,
 	idPrefixOf,
 	isTerminal,
@@ -38,6 +39,8 @@ import {
 	statesOf,
 	transitionsOf,
 } from "./schema.ts";
+
+import { describeWaiting } from "./waiting.ts";
 
 type Row = Record<string, unknown>;
 
@@ -164,20 +167,17 @@ export function listHint(db: DatabaseSync, filter: ListFilter = {}): string | un
 
 /**
  * 在等谁动：未收口、且当前状态属于「等人接手或裁定」的单。
- * since 取该单进入当前状态的时刻，不是最后一次改动正文的时刻。
+ * 依赖等待保持可见；可执行起点另按依赖解锁事件推导，正文改动不重置计时。
  */
 export function waitingOrders(db: DatabaseSync, actor?: string): Waiting[] {
 	const rows = listOrders(db, actor ? { nextActor: actor } : {}).filter((o) => isWaitingState(db, o.state));
-	return rows.map((order) => ({
-		order,
-		since: enteredStateAt(db, order.id, order.state) ?? order.updatedAt,
-	}));
+	return rows.map((order) => describeWaiting(db, order));
 }
 
-/** 等太久还没动的：催办与扫描的判据 */
-export function staleWaiting(db: DatabaseSync, minutes = STALE_MINUTES, actor?: string): Waiting[] {
-	const cutoff = Date.now() - minutes * 60_000;
-	return waitingOrders(db, actor).filter((w) => Date.parse(w.since) < cutoff);
+/** 仅催可处理或待裁定的单，不把依赖等待算作停滞。 */
+export function staleWaiting(db: DatabaseSync, minutes = STALE_MINUTES, actor?: string, at = Date.now()): Waiting[] {
+	const cutoff = at - minutes * 60_000;
+	return waitingOrders(db, actor).filter((w) => w.kind !== "dependency" && Date.parse(w.since) < cutoff);
 }
 
 /** 可开工却没人接的：依赖已解、状态还是待认领 */

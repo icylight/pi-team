@@ -27,13 +27,15 @@ function formatActors(actors: string[], width?: number): string {
 	return width ? (head + rest).padEnd(width) : head + rest;
 }
 
-export function formatList(orders: Order[], heading?: string): string {
+export function formatList(orders: Order[], heading?: string, waiting: Waiting[] = []): string {
 	if (!orders.length) return heading ? `${heading}：没有匹配的工单` : "没有匹配的工单";
+	const reasons = new Map(waiting.filter(w => w.kind !== "action").map(w => [w.order.id, formatWaitingReason(w)]));
 	const lines = orders.map((o) => {
 		const id = o.id.padEnd(6);
 		const state = o.state.padEnd(6);
 		const who = formatActors(o.nextActors, 10);
-		return `${id}${state}${who}${short(o.title, 70)}`;
+		const reason = reasons.get(o.id);
+		return `${id}${state}${who}${short(o.title, 70)}${reason ? `｜${reason}` : ""}`;
 	});
 	const head = `${"id".padEnd(6)}${"状态".padEnd(6)}${"下一步找".padEnd(10)}标题`;
 	const body = [head, ...lines].join("\n");
@@ -73,15 +75,22 @@ export function formatHistory(events: OrderEvent[]): string {
 		.join("\n");
 }
 
-/** 在等某人动的单：等多久 + 找谁 + 标题 */
+export function formatWaitingReason(w: Waiting): string {
+	if (w.kind === "dependency") return `等依赖：${w.dependencies.map(dep => `${dep.id} ${dep.state}`).join("、")}`;
+	if (w.kind === "decision") return `上游已取消，需人工裁定：${w.dependencies.filter(dep => dep.cancelled).map(dep => dep.id).join("、")}`;
+	return "";
+}
+
+/** 在等某人动的单：依赖等待不显示催办时长，保留阻塞原因。 */
 export function formatWaiting(items: Waiting[], heading?: string, now = Date.now()): string {
 	if (!items.length) return heading ? `${heading}：没有` : "没有";
 	const lines = [...items]
 		.sort((a, b) => Date.parse(a.since) - Date.parse(b.since))
 		.map((w) => {
-			const waited = formatAgo(Math.max(0, (now - Date.parse(w.since)) / 60_000));
+			const waited = w.kind === "dependency" ? "不计催办" : formatAgo(Math.max(0, (now - Date.parse(w.since)) / 60_000));
 			const o = w.order;
-			return `${o.id.padEnd(6)}${o.state.padEnd(6)}${waited.padStart(7)}  ${short(o.title, 60)}`;
+			const reason = formatWaitingReason(w);
+			return `${o.id.padEnd(6)}${o.state.padEnd(6)}${waited.padStart(7)}  ${short(o.title, 60)}${reason ? `｜${reason}` : ""}`;
 		});
 	const head = `${"id".padEnd(6)}${"状态".padEnd(6)}${"等了".padStart(7)}  标题`;
 	return [heading ? `${heading}（${items.length} 条）` : undefined, head, ...lines]
