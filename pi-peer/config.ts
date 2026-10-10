@@ -24,8 +24,12 @@ import { projectLabel } from "./store.ts";
 export const DEFAULT_CONFIG_DIR = ".pi";
 export const CONFIG_FILE = "peer.json";
 
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
 export interface RoleConfig {
 	card?: string;
+	model?: string;
+	thinkingLevel?: (typeof THINKING_LEVELS)[number];
 }
 
 export interface ProjectConfig {
@@ -130,8 +134,23 @@ function parseRoles(
 	const roles: Record<string, RoleConfig> = {};
 	for (const [role, value] of Object.entries(raw)) {
 		if (typeof value === "string") roles[role] = { card: value };
-		else if (isRecord(value) && (value.card === undefined || typeof value.card === "string")) {
-			roles[role] = { card: value.card as string | undefined };
+		else if (isRecord(value)) {
+			const parsed: RoleConfig = {};
+			if (value.card !== undefined) {
+				if (typeof value.card === "string") parsed.card = value.card;
+				else problems.push(`${field}.${role}.card 要写路径字符串，这一项被忽略`);
+			}
+			if (value.model !== undefined) {
+				if (typeof value.model === "string" && /^[^\s/]+\/\S+$/.test(value.model.trim())) {
+					parsed.model = value.model.trim();
+				} else problems.push(`${field}.${role}.model 要写 provider/model-id，这一项被忽略`);
+			}
+			if (value.thinkingLevel !== undefined) {
+				if (THINKING_LEVELS.includes(value.thinkingLevel as RoleConfig["thinkingLevel"] & string)) {
+					parsed.thinkingLevel = value.thinkingLevel as RoleConfig["thinkingLevel"];
+				} else problems.push(`${field}.${role}.thinkingLevel 要写 ${THINKING_LEVELS.join(" / ")}，这一项被忽略`);
+			}
+			roles[role] = parsed;
 		} else {
 			problems.push(`${field}.${role} 要写角色卡路径字符串或 { card: 路径 }，这一项被忽略`);
 		}
@@ -149,7 +168,7 @@ export type Origin =
 
 export interface ConfigItem {
 	/** identity=项目标签，role=本次生效的角色卡，roles=可用角色名单，flow=流程文档 */
-	key: "identity" | "role" | "roles" | "flow";
+	key: "identity" | "role" | "roles" | "flow" | "model" | "thinkingLevel";
 	label: string;
 	value: string;
 	origin: Origin;
@@ -205,6 +224,21 @@ export function describeConfig(
 			value: card.path ? path.relative(options.cwd, card.path) || card.path : "（没找到，角色不加载）",
 			origin: card.origin,
 		});
+		for (const key of ["model", "thinkingLevel"] as const) {
+			const groupValue = loaded.config.group?.roles?.[options.role]?.[key];
+			const value = groupValue ?? loaded.config.roles?.[options.role]?.[key];
+			items.push({
+				key,
+				label: key === "model" ? "角色默认模型" : "角色默认思考强度",
+				value: value ?? "（保留会话设置）",
+				origin: value
+					? {
+							kind: "declared",
+							detail: `${groupValue !== undefined ? "group.roles" : "roles"}.${options.role}.${key}`,
+						}
+					: { kind: "absent", detail: "未配置，保留会话设置" },
+			});
+		}
 	}
 
 	const flow = resolveFlow(options.cwd, loaded.config, dirName);

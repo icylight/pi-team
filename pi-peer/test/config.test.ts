@@ -179,7 +179,7 @@ test("报告逐项写出来源：项目标签、可用角色、本次角色卡�
 test("声明齐全时，报告里每项都是「配置」来源，没有兜底字样", () => {
 	const { cwd } = project({
 		".pi/peer.json": {
-			group: { name: "ipd", flow: ".pi/flows/ipd.md", roles: { owner: ".pi/characters/owner.md" } },
+			group: { name: "ipd", flow: ".pi/flows/ipd.md", roles: { owner: { card: ".pi/characters/owner.md", model: "test/model", thinkingLevel: "high" } } },
 		},
 		".pi/characters/owner.md": "我是 owner",
 		".pi/flows/ipd.md": "流程在这里",
@@ -187,7 +187,7 @@ test("声明齐全时，报告里每项都是「配置」来源，没有兜底�
 	const report = describeConfig(load(cwd), { cwd, role: "owner" });
 	assert.deepEqual(
 		report.items.map((item) => `${item.key}:${item.origin.kind}`),
-		["identity:declared", "roles:declared", "role:declared", "flow:declared"],
+		["identity:declared", "roles:declared", "role:declared", "model:declared", "thinkingLevel:declared", "flow:declared"],
 	);
 	assert.ok(!renderConfigReport(report).includes("兜底："));
 });

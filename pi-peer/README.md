@@ -153,13 +153,21 @@ npm test        # node --test，67 个用例覆盖角色认领、跨项目寻址
     "name": "example-project",
     "roles": {
       "owner": { "card": ".pi/characters/owner.md" },
-      "dev": { "card": ".pi/characters/dev.md" },
+      "dev": {
+        "card": ".pi/characters/dev.md",
+        "model": "feizhi/deepseek-flash",
+        "thinkingLevel": "high"
+      },
       "qa": { "card": ".pi/characters/qa.md" }
     },
     "flow": ".pi/flows/ipd.md"
   }
 }
 ```
+
+角色对象支持 `model`（完整 `provider/model-id`）与 `thinkingLevel`（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）。可只配其中一项；未配的保留会话设置。`group.roles` 的字段优先于顶层 `roles`，角色卡路径的字符串简写保持兼容。
+
+默认设置在角色会话首次加载时应用并记录，恢复或 `/reload` 不覆盖之后的手动选择。已有角色会话在升级后首次加载时也会初始化一次。模型切换失败时保留当前模型与思考强度并提示原因，下次加载重试；模型支持的思考等级由 pi 自动限制。角色卡不存在的普通会话不应用角色默认设置。`/peer-config` 展示配置值及来源，不代表恢复会话的当前选择；当前模型见 `/model`，当前思考强度见 `/thinking`。
 
 `flow` 只作为当前角色会话的 Markdown 参考注入，不自动修改工单或执行交接。角色的第一个实例名保留基础名，后续实例使用 `-2`、`-3`；会话退出后实例名可复用 —— `/peer-new` 会先结束当前会话再领号，所以同一会话反复换角色仍拿基础名，只有并行会话才会递增到 `dev-2`。
 

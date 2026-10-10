@@ -17,12 +17,21 @@ function mountPeer(cwd: string, peerRoot: string) {
 	const channels = new Map();
 	const tools = new Map();
 	const commands = new Map();
+	const renderers = new Map();
 	const notes: string[] = [];
+	const entries: { type: string; customType: string; data: unknown }[] = [];
+	const modelCalls: string[] = [];
+	const thinkingCalls: string[] = [];
 	const pi = {
+		setModel: async (model: { provider: string; id: string }) => {
+			modelCalls.push(`${model.provider}/${model.id}`);
+			return true;
+		},
+		setThinkingLevel: (level: string) => thinkingCalls.push(level),
 		registerTool: (def: { name: string }) => tools.set(def.name, def),
 		registerCommand: (name: string, options: unknown) => commands.set(name, options),
-		registerMessageRenderer: () => {},
-		appendEntry: () => {},
+		registerMessageRenderer: (name: string, renderer: unknown) => renderers.set(name, renderer),
+		appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
 		on: (name: string, fn: unknown) => handlers.set(name, fn),
 		getSessionName: () => "sender",
 		events: {
@@ -39,14 +48,18 @@ function mountPeer(cwd: string, peerRoot: string) {
 	const previousCwd = process.cwd();
 	const previousRoot = process.env.PI_PEER_ROOT;
 	process.env.PI_PEER_ROOT = peerRoot;
-	extension(pi);
 	process.chdir(cwd);
+	extension(pi);
 	return {
 		handlers,
 		channels,
 		tools,
 		commands,
+		renderers,
 		notes,
+		entries,
+		modelCalls,
+		thinkingCalls,
 		restore() {
 			// 先让扩展自己收尾：session_start 开了 fs.watch 与定时器，不关掉测试进程不退出
 			(handlers.get("session_shutdown") as (() => Promise<void> | void) | undefined)?.();
@@ -55,6 +68,46 @@ function mountPeer(cwd: string, peerRoot: string) {
 			else process.env.PI_PEER_ROOT = previousRoot;
 		},
 	};
+}
+
+test("peer 渲染器提取文本块并跳过图片", () => {
+	const { cwd, peerRoot } = tmpPair();
+	const peer = mountPeer(cwd, peerRoot);
+	try {
+		const render = peer.renderers.get("peer");
+		const component = render(
+			{ content: [
+				{ type: "text", text: "[peer] from dev\n\n第一段" },
+				{ type: "image", data: "synthetic", mimeType: "image/png" },
+				{ type: "text", text: "第二段" },
+			], details: { fromName: "dev", fromModel: "test/model" } },
+			{ outputPad: 0 },
+			{ fg: (_color: string, text: string) => text },
+		);
+		assert.deepEqual(component.render(80).map((line: string) => line.trimEnd()), ["⇄ dev · test/model", "第一段", "第二段"]);
+	} finally {
+		peer.restore();
+	}
+});
+
+for (const [name, content, expected] of [
+	["字符串保留正文并去掉 peer 头", "[peer] from dev\n\n正文", ["⇄ peer · ?", "正文"]],
+	["空字符串", "", ["⇄ peer · ?", ""]],
+	["空数组", [], ["⇄ peer · ?", ""]],
+	["仅图片", [{ type: "image", data: "synthetic", mimeType: "image/png" }], ["⇄ peer · ?", ""]],
+] as const) {
+	test(`peer 渲染器：${name}`, () => {
+		const { cwd, peerRoot } = tmpPair();
+		const peer = mountPeer(cwd, peerRoot);
+		try {
+			const component = peer.renderers.get("peer")(
+				{ content }, { outputPad: 0 }, { fg: (_color: string, text: string) => text },
+			);
+			assert.deepEqual(component.render(80).map((line: string) => line.trimEnd()), expected);
+		} finally {
+			peer.restore();
+		}
+	});
 }
 
 /** 造一个在线的角色会话成员，pid 用当前进程（必活） */

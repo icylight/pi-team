@@ -64,6 +64,7 @@ const POLL_MS = 2_000;
 const DRAIN_DEBOUNCE_MS = 50;
 /** 会话条目类型：记录本会话领取的角色，重启后据此恢复 */
 const ROLE_ENTRY = "peer-role";
+const ROLE_DEFAULTS_ENTRY = "peer-role-defaults";
 /** 角色选择列表里的自定义项；角色名须以字母开头，所以它与真角色不会重名 */
 const CUSTOM_ROLE_ITEM = "＋ 自定义角色名…";
 
@@ -117,6 +118,46 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`pi-peer: 未找到角色 ${role} 的角色卡，按普通会话启动`, "warning");
 		}
 		const effectiveRole = role && roleCardPath ? role : undefined;
+		let activeModel = ctx.model;
+		// AI(TAG): [角色默认设置] 默认值只初始化一次，恢复会话保留用户后续选择。
+		if (
+			effectiveRole &&
+			!ctx.sessionManager
+				.getEntries()
+				.some(
+					(entry) =>
+						entry.type === "custom" &&
+						entry.customType === ROLE_DEFAULTS_ENTRY &&
+						(entry.data as { role?: string } | undefined)?.role === effectiveRole,
+				)
+		) {
+			const defaults = {
+				...loaded.config.roles?.[effectiveRole],
+				...loaded.config.group?.roles?.[effectiveRole],
+			};
+			let applied = true;
+			if (defaults.model) {
+				const slash = defaults.model.indexOf("/");
+				try {
+					const model = ctx.modelRegistry.find(defaults.model.slice(0, slash), defaults.model.slice(slash + 1));
+					if (!model || !(await pi.setModel(model))) {
+						throw new Error("模型未注册或缺少认证");
+					}
+					activeModel = model;
+				} catch (error) {
+					applied = false;
+					if (ctx.hasUI)
+						ctx.ui.notify(
+							`pi-peer: 角色 ${effectiveRole} 默认模型 ${defaults.model} 未应用：${(error as Error).message}，保留会话设置`,
+							"warning",
+						);
+				}
+			}
+			if (applied) {
+				if (defaults.thinkingLevel !== undefined) pi.setThinkingLevel(defaults.thinkingLevel);
+				pi.appendEntry(ROLE_DEFAULTS_ENTRY, { role: effectiveRole });
+			}
+		}
 
 		// 生效配置从哪来：角色定下来才判得了「角色卡是声明的还是兜底命中的」，所以放在这里报。
 		// 该不该出声由 configWarnings 判：除了项目标签，兜底真生效了、或文件本身有问题，才提。
@@ -142,7 +183,7 @@ export default function (pi: ExtensionAPI) {
 			project,
 			role: effectiveRole,
 			roleSlot,
-			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown",
+			model: activeModel ? `${activeModel.provider}/${activeModel.id}` : "unknown",
 			pid: process.pid,
 			cwd: ctx.cwd,
 			sessionFile: ctx.sessionManager.getSessionFile(),
@@ -192,6 +233,12 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 		}
+	});
+
+	pi.on("model_select", (event) => {
+		if (!store || !self) return;
+		self.model = `${event.model.provider}/${event.model.id}`;
+		store.register(self);
 	});
 
 	// 忙闲：派工方据此避开正在跑一轮的会话，不打断进行中的工作。
@@ -309,7 +356,14 @@ export default function (pi: ExtensionAPI) {
 		const details = (message.details ?? {}) as { fromName?: string; fromModel?: string };
 		const head =
 			theme.fg("accent", `⇄ ${details.fromName ?? "peer"}`) + theme.fg("dim", ` · ${details.fromModel ?? "?"}`);
-		const body = (message.content ?? "").replace(/^\[peer\][^\n]*\n\n?/, "");
+		const content =
+			typeof message.content === "string"
+				? message.content
+				: (message.content ?? [])
+						.filter((block) => block.type === "text")
+						.map((block) => block.text)
+						.join("\n");
+		const body = content.replace(/^\[peer\][^\n]*\n\n?/, "");
 		return new Text(`${head}\n${body}`, options.outputPad, 0);
 	});
 
