@@ -61,6 +61,10 @@ npm test
 
 运行时依赖由 pi 宿主提供，以 `peerDependencies` 声明；独立运行测试时，npm 安装这些 peer 依赖。测试使用临时目录和测试替身，不访问实际消息邮箱或项目台账。
 
+代码检查由本仓库的 `biome.json` 和 `tsconfig.json` 管理，不继承外部仓库配置。`npm run check` 只读，`npm run fix` 会改写文件；Promise 规则属于 Biome 的实验性规则，不能代替运行测试。`npm run check:types` 检查运行时代码，测试替身由测试执行验证。
+
+检查命令要求环境提供 Biome、TypeScript 和 Node 类型声明；在 pi-config 中检出时由父仓库已有开发依赖提供，独立检出时需另行准备工具。
+
 问题与改动通过 [GitHub Issues](https://github.com/icylight/pi-team/issues) 和 Pull Request 提交。改动跨包事件协议时，两端实现与测试一起更新。
 
 ## 许可证

@@ -34,6 +34,9 @@
     ]
   },
   "scripts": {
+    "check": "biome check --error-on-warnings .",
+    "fix": "biome check --write --error-on-warnings .",
+    "check:types": "tsc --noEmit",
     "test": "node --test --test-reporter=tap pi-peer/test/*.test.ts pi-work-orders/test/*.test.mjs"
   },
   "peerDependencies": {

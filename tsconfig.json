@@ -1,0 +1,18 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"lib": ["ES2022"],
+		"strict": true,
+		"erasableSyntaxOnly": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"types": ["node"]
+	},
+	"include": ["pi-peer/*.ts", "pi-work-orders/**/*.ts"],
+	"exclude": ["**/node_modules", "**/test"]
+}
