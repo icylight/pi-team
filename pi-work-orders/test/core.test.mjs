@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { eventsOf, initLedger, openLedger, stateOf, statesOf } from "../core/schema.ts";
+import { eventsOf, initLedger, openLedger, SCHEMA_VERSION, stateOf, statesOf } from "../core/schema.ts";
 import {
 	addDep,
 	appendBody,
@@ -478,17 +478,18 @@ test("只改正文记 field，不动状态就不算重新开始等", () => {
 
 // ── 旧库升级 ────────────────────────────────────
 
-test("v2 的库打开时自动升到 v3，数据不动", () => {
+test("v2 的库打开时逐版升级，数据不动", () => {
 	const { db, dbPath } = freshLedger();
 	createOrder(db, { title: "老数据", nextActors: ["dev"] }, owner);
-	// 退回 v2 结构：删掉 events 表，把版本号改回去
+	// 退回 v2 结构：移除新列与 events 表，只操作临时测试库。
+	db.exec("ALTER TABLE orders DROP COLUMN contents;");
 	db.exec("DROP TABLE events;");
 	db.exec("PRAGMA user_version=2;");
 	db.close();
 
 	const reopened = openLedger(dbPath);
 	const version = reopened.prepare("PRAGMA user_version").get();
-	assert.equal(version.user_version, 3);
+	assert.equal(version.user_version, SCHEMA_VERSION);
 	assert.equal(listOrders(reopened).length, 1, "老工单还在");
 	assert.equal(eventsOf(reopened, "T01").length, 0, "升级后的动作记录从这一刻开始记");
 	reopened.close();

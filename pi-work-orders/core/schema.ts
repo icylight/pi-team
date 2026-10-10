@@ -22,7 +22,7 @@ import {
 	type StateRole,
 } from "./types.ts";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export const DEFAULT_DB_DIR = ".work-orders";
 export const DEFAULT_DB_NAME = "work-orders.sqlite";
 
@@ -37,6 +37,7 @@ CREATE TABLE orders (
   id            TEXT PRIMARY KEY,
   title         TEXT NOT NULL,
   body          TEXT NOT NULL DEFAULT '',
+  contents      TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(contents) AND json_type(contents) = 'array'),
   state         TEXT NOT NULL,
   next_actors   TEXT NOT NULL CHECK (json_valid(next_actors)),
   closing_basis TEXT,
@@ -73,6 +74,10 @@ CREATE INDEX events_order  ON events(order_id, id);
  * 只加表、加列，不重建：旧库里已有的数据不动。
  */
 const MIGRATIONS: Record<number, string> = {
+	3: `
+ALTER TABLE orders ADD COLUMN contents TEXT NOT NULL DEFAULT '[]'
+  CHECK (json_valid(contents) AND json_type(contents) = 'array');
+`,
 	2: `
 CREATE TABLE events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,

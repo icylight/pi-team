@@ -41,6 +41,7 @@ import {
 } from "./schema.ts";
 
 import { describeWaiting } from "./waiting.ts";
+import { normalizeContents } from "./contents.ts";
 
 type Row = Record<string, unknown>;
 
@@ -78,6 +79,7 @@ function toOrder(row: Row): Order {
 		id: String(row.id),
 		title: String(row.title),
 		body: String(row.body ?? ""),
+		contents: JSON.parse(String(row.contents ?? "[]")),
 		state: String(row.state),
 		nextActors: JSON.parse(String(row.next_actors)) as string[],
 		closingBasis: row.closing_basis == null ? null : String(row.closing_basis),
@@ -294,6 +296,7 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 	if (!input.title?.trim()) throw new LedgerError("标题不能为空");
 	if (!ctx.reason?.trim()) throw new LedgerError("建单也要写理由：这条为什么要建");
 	const actors = normalizeActors(input.nextActors);
+	const contents = normalizeContents(input.contents);
 	assertActorNames(actors);
 
 	const states = statesOf(db);
@@ -316,9 +319,18 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 	db.exec("BEGIN IMMEDIATE;");
 	try {
 		db.prepare(
-			`INSERT INTO orders(id,title,body,state,next_actors,closing_basis,created_at,updated_at,revision)
-			 VALUES(?,?,?,?,?,NULL,?,?,1)`,
-		).run(id, input.title.trim(), input.body ?? "", states[role], JSON.stringify(actors), stamp, stamp);
+			`INSERT INTO orders(id,title,body,contents,state,next_actors,closing_basis,created_at,updated_at,revision)
+			 VALUES(?,?,?,?,?,?,NULL,?,?,1)`,
+		).run(
+			id,
+			input.title.trim(),
+			input.body ?? "",
+			JSON.stringify(contents),
+			states[role],
+			JSON.stringify(actors),
+			stamp,
+			stamp,
+		);
 		for (const dep of deps) {
 			db.prepare("INSERT INTO deps(order_id,depends_on) VALUES(?,?)").run(id, dep);
 		}
@@ -343,8 +355,7 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 /**
  * 改一条工单：字段替换、正文追加、状态转换在同一次事务里，一起成功或一起回滚。
  *
- * expectedRevision 在动手之前只比一次（含追加），所以「追加 + 改字段」放在同一次调用里
- * 不会自己跟自己的版本号打架。
+ * 带 expectedRevision 时，写入也校验版本，拦住读取后到事务开始前的并发更新。
  */
 export function updateOrder(
 	db: DatabaseSync,
@@ -385,6 +396,7 @@ export function updateOrder(
 	const next = {
 		title: patch.title?.trim() || old.title,
 		body: nextBody,
+		contents: patch.contents === undefined ? old.contents : normalizeContents(patch.contents),
 		state: targetState,
 		nextActors,
 		closingBasis: patch.closingBasis ?? old.closingBasis,
@@ -407,18 +419,24 @@ export function updateOrder(
 
 	db.exec("BEGIN IMMEDIATE;");
 	try {
-		db.prepare(
-			`UPDATE orders SET title=?, body=?, state=?, next_actors=?, closing_basis=?,
-			 updated_at=?, revision=revision+1 WHERE id=?`,
+		const result = db.prepare(
+			`UPDATE orders SET title=?, body=?, contents=?, state=?, next_actors=?, closing_basis=?,
+			 updated_at=?, revision=revision+1 WHERE id=? AND (? IS NULL OR revision=?)`,
 		).run(
 			next.title,
 			next.body,
+			JSON.stringify(next.contents),
 			next.state,
 			JSON.stringify(nextActors),
 			next.closingBasis,
 			now(),
 			id,
+			expectedRevision ?? null,
+			expectedRevision ?? null,
 		);
+		if (Number(result.changes) !== 1) {
+			throw new LedgerError("版本冲突：工单已被其他会话修改；请重读工单再改");
+		}
 		const stateChanged = next.state !== old.state;
 		if (stateChanged) {
 			logEvent(db, {
@@ -429,7 +447,11 @@ export function updateOrder(
 				toState: next.state,
 				note: ctx.reason,
 			});
-		} else if (next.body !== old.body || next.title !== old.title) {
+		} else if (
+			next.body !== old.body ||
+			next.title !== old.title ||
+			JSON.stringify(next.contents) !== JSON.stringify(old.contents)
+		) {
 			logEvent(db, { orderId: id, actor: ctx.actor, kind: "field", note: ctx.reason });
 		}
 		db.exec("COMMIT;");

@@ -55,6 +55,10 @@ export function formatOrder(view: OrderView): string {
 	lines.push(
 		`时间：建于 ${view.createdAt.slice(0, 16).replace("T", " ")}｜改于 ${view.updatedAt.slice(0, 16).replace("T", " ")}｜rev ${view.revision}`,
 	);
+	if (view.contents.length) {
+		lines.push("内容入口：");
+		for (const content of view.contents) lines.push(`- ${content.name}：${content.path}`);
+	}
 	if (view.body.trim()) {
 		lines.push("─".repeat(40));
 		lines.push(view.body.trim());

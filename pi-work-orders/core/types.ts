@@ -94,11 +94,18 @@ export interface OrderEvent {
 	at: string;
 }
 
+export interface OrderContent {
+	name: string;
+	/** 项目内 md 路径；入口本身不保证文件存在。 */
+	path: string;
+}
+
 export interface Order {
 	id: string;
 	title: string;
 	/** 正文，markdown 文本；范围修订用追加，不覆盖 */
 	body: string;
+	contents: OrderContent[];
 	/** 当前状态名（取值为项目声明的状态集之一） */
 	state: string;
 	/** 这一步该谁动：有序候选，第一个是首选，后面是首选不在时的备选；用户本人也写成名字 */
@@ -148,6 +155,7 @@ export interface CreateInput {
 	id?: string;
 	title: string;
 	body?: string;
+	contents?: OrderContent[];
 	nextActors: string[];
 	/** 初始状态的角色，默认 claimable */
 	role?: StateRole;
@@ -163,6 +171,8 @@ export interface UpdateInput {
 	body?: string;
 	/** 追加一段正文（范围修订用这个），在 body 之后拼接；与本次其他字段同一次事务 */
 	appendBody?: string;
+	/** 替换完整内容入口列表；省略保留，空数组清空。 */
+	contents?: OrderContent[];
 	closingBasis?: string;
 }
 

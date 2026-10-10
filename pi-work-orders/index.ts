@@ -56,6 +56,11 @@ import {
 
 let api: ExtensionAPI | undefined;
 
+const ContentEntrySchema = Type.Object({
+	name: Type.String({ description: "内容名称，同一工单内唯一，如需求、方案或验证" }),
+	path: Type.String({ description: "项目内相对 md 路径；允许尚未创建的文件，只保存入口" }),
+});
+
 export default function (pi: ExtensionAPI) {
 	api = pi;
 
@@ -349,7 +354,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "orders_show",
 		label: "看工单",
-		description: "看一条工单的全文：正文、依赖、下游、终止依据、时间，以及最近几次动作。",
+		description: "看一条工单的全文：正文、具名 md 内容入口、依赖、下游、终止依据、时间，以及最近几次动作。",
 		parameters: Type.Object({
 			id: Type.String({ description: "工单号，如 T01" }),
 			history: Type.Optional(Type.Number({ description: "带上最近几条动作记录，默认 5，最多 20" })),
@@ -372,13 +377,14 @@ export default function (pi: ExtensionAPI) {
 		name: "orders_create",
 		label: "建工单",
 		description:
-			"建一条工单。正文写目标、交付物、边界、输入、验收口径（markdown）。dependsOn 传上游工单号，会做环检测。",
+			"建一条工单。正文写目标、交付物、边界、输入、验收口径（markdown）；详细内容可用 contents 关联具名 md 文件。dependsOn 传上游工单号，会做环检测。",
 		parameters: Type.Object({
 			title: Type.String({ description: "一句话说清这条要干什么" }),
 			nextActors: Type.Array(Type.String(), {
 				description: "下一步找谁：第一个是首选，后面是首选不在时的备选（会话名；等用户批准就写用户）",
 			}),
 			body: Type.Optional(Type.String({ description: "正文，markdown" })),
+			contents: Type.Optional(Type.Array(ContentEntrySchema, { description: "具名 md 内容入口；省略默认为空列表" })),
 			id: Type.Optional(Type.String({ description: "指定工单号；不给就自动编号" })),
 			role: Type.Optional(
 				Type.String({
@@ -400,6 +406,7 @@ export default function (pi: ExtensionAPI) {
 							id: params.id,
 							title: params.title,
 							body: params.body,
+							contents: params.contents,
 							nextActors: params.nextActors,
 							role: params.role as StateRole | undefined,
 							dependsOn: params.dependsOn,
@@ -432,6 +439,11 @@ export default function (pi: ExtensionAPI) {
 			appendBody: Type.Optional(
 				Type.String({ description: "追加一段正文（范围修订用这个）；与同一次调用的其他字段同事务" }),
 			),
+			contents: Type.Optional(
+				Type.Array(ContentEntrySchema, {
+					description: "替换完整内容入口列表；省略保留，传 [] 清空，建议同时传 expectedRevision",
+				}),
+			),
 			closingBasis: Type.Optional(Type.String({ description: "终止依据：结单填证据指针，取消填理由/被谁取代" })),
 			expectedRevision: Type.Optional(Type.Number({ description: "手里这条的 rev，用于并发冲突检测" })),
 			actor: Type.Optional(Type.String({ description: "操作者名字，默认取本会话名" })),
@@ -451,6 +463,7 @@ export default function (pi: ExtensionAPI) {
 						params.title != null ||
 						body != null ||
 						append != null ||
+						params.contents !== undefined ||
 						params.closingBasis != null;
 					// 正文追加跟字段写入走同一次 updateOrder：一起生效或一起回滚，
 					// 否则第二次调用报错时，正文已经落库，调用方却以为失败。
@@ -464,6 +477,7 @@ export default function (pi: ExtensionAPI) {
 									title: params.title,
 									body,
 									appendBody: append,
+									contents: params.contents,
 									closingBasis: params.closingBasis,
 								},
 								actorCtx,

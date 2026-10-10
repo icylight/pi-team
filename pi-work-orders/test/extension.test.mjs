@@ -88,6 +88,45 @@ async function call(tools, name, params, ctx) {
 	return out.content.map((c) => c.text).join("\n");
 }
 
+test("工具支持内容入口的建单、替换、清空与版本冲突", async () => {
+	const cwd = tmpProject();
+	const { tools } = mount();
+	const ctx = ctxFor(cwd);
+	assert.ok(tools.get("orders_create").parameters.properties.contents);
+	assert.ok(tools.get("orders_update").parameters.properties.contents);
+	await call(tools, "orders_init", {}, ctx);
+	const created = await call(tools, "orders_create", {
+		title: "横向内容", body: "摘要", nextActors: ["dev"],
+		contents: [{ name: "需求", path: "docs/需求.md" }, { name: "方案", path: "docs/方案.md" }],
+	}, ctx);
+	assert.match(created, /内容入口：\n- 需求：docs\/需求.md\n- 方案：docs\/方案.md/);
+	const changed = await call(tools, "orders_update", {
+		id: "T01", reason: "补验证", expectedRevision: 1,
+		contents: [{ name: "验证", path: "docs/验证.md" }],
+	}, ctx);
+	assert.match(changed, /- 验证：docs\/验证.md/);
+	assert.doesNotMatch(changed, /- 需求：/);
+	assert.match(changed, /rev 2/);
+	const conflict = await call(tools, "orders_update", {
+		id: "T01", reason: "旧版本", expectedRevision: 1, contents: [],
+	}, ctx);
+	assert.match(conflict, /失败：版本冲突/);
+	const bad = await call(tools, "orders_update", {
+		id: "T01", reason: "非法路径", expectedRevision: 2,
+		contents: [{ name: "验证", path: "../outside.md" }], appendBody: "不能落库",
+	}, ctx);
+	assert.match(bad, /失败：.*项目内.*相对.*md/);
+	const shown = await call(tools, "orders_show", { id: "T01" }, ctx);
+	assert.match(shown, /- 验证：docs\/验证.md/);
+	assert.doesNotMatch(shown, /不能落库/);
+	assert.match(shown, /rev 2/);
+	const clear = await call(tools, "orders_update", {
+		id: "T01", reason: "清空入口", expectedRevision: 2, contents: [],
+	}, ctx);
+	assert.doesNotMatch(clear, /内容入口/);
+	assert.match(clear, /rev 3/);
+});
+
 test("扩展挂载后注册 7 个工具和 1 个命令", () => {
 	const { tools, commands } = mount();
 	assert.deepEqual([...tools.keys()].sort(), [
