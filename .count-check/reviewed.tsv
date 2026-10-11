@@ -1,0 +1,26 @@
+# pi-team 的数量词判定清单：路径范围<tab>命中文本<tab>判定<tab>依据（制表符分隔，# 开头是注释）
+#
+# 判定：ok = 这个数字就是该集合的现场基数；n/a = 这个数字说的不是本表登记的集合。
+# 判 ok 时必须写 `ok@集合名` —— 「工具」「命令」在本仓库都指得到两个集合（peer 的与工单的），
+# 不写明指哪个就报 UNRESOLVED。
+#
+# ── 核到基数的：真相源在扩展注册处与核心类型定义里 ──
+pi-work-orders/test/extension.test.mjs	7 个工具	ok@工单工具	该测试断言扩展挂载后注册的工具数（现场数 registerTool 调用）
+pi-work-orders/test/extension.test.mjs	1 个命令	ok@工单命令	同上，命令数（现场数 registerCommand 调用）
+pi-work-orders/README.md	七个状态	ok@状态	core/types.ts 的 ROLES，默认状态集项数
+README.md	两个包	ok@包	根目录下的 pi-peer / pi-work-orders 两个包目录
+README.md	两个扩展和工单	ok@扩展	package.json 的 pi.extensions 两项
+README.md	两个扩展	ok@扩展	同上：安装根包会同时加载 pi-peer / pi-work-orders
+#
+# ── 文档自述与别的含义 ──
+pi-work-orders/skills/work-orders/SKILL.md	三个动作	n/a	该 skill 自己的小节划分，文档自述
+pi-work-orders/web/scan.ts	两种形态	n/a	web 看板扫描的两种形态（根目录自身、一级子目录），注释自述
+pi-peer/config.ts	三类在文件	n/a	注释里给 peer.json 字段分的三类，概念划分
+pi-peer/index.ts	两个会话	n/a	「避免两个会话互相刷屏」指任意两个会话，不定指
+pi-work-orders/skills/work-orders/SKILL.md	两处状态	n/a	「表外的 md 再记一份状态」里的两处指任意两处，不定指
+pi-peer/README.md	一次工具	n/a	「不占一次工具调用」，频次
+pi-peer/index.ts	一次工具	n/a	同上
+pi-peer/README.md	67 个用例覆盖角色	n/a	跑 npm test 才有的用例数，静态数不出来（有循环生成的用例）
+pi-work-orders/test/watch.test.mjs	三个字段	n/a	该用例的输入写了三个非法字段，说的是这一处的输入规模
+README.md	一个包	n/a	「只需其中一个包时」指任一个包，不定指
+README.md	一个扩展	n/a	「同一个扩展只保留一种安装方式」指任一个扩展，不定指
