@@ -15,7 +15,12 @@
  * 这里只锚定「角色」，不认状态名。
  */
 
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as http from "node:http";
+import * as os from "node:os";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { buildDigest, buildWakeText, renderStale } from "./core/digest.ts";
@@ -55,6 +60,117 @@ import {
 } from "./core/watch.ts";
 
 let api: ExtensionAPI | undefined;
+
+// ── 看板：跨项目只读浏览，跑在独立进程里 ──────────────
+
+// 不挂在会话上：会话开开关关，看板还在；多个会话共用一个端口。
+const WEB_LOG = path.join(os.tmpdir(), "pi-work-orders-web.log");
+const WEB_PORT_DEFAULT = 8787;
+
+function webPort(): number {
+	const value = Number(process.env.PI_WORK_ORDERS_WEB_PORT?.trim());
+	return Number.isInteger(value) && value > 0 && value <= 65535 ? value : WEB_PORT_DEFAULT;
+}
+
+/** 探端口上是不是我们的看板：既能问「在没在跑」，也能等「起来没」 */
+async function webAlive(port: number, timeout = 500): Promise<boolean> {
+	return await new Promise<boolean>((resolve) => {
+		const req = http.get({ host: "127.0.0.1", port, path: "/healthz", timeout, agent: false }, (res) => {
+			res.resume();
+			resolve(res.statusCode === 200);
+		});
+		req.on("error", () => resolve(false));
+		req.on("timeout", () => {
+			req.destroy();
+			resolve(false);
+		});
+	});
+}
+
+async function webStop(port: number): Promise<boolean> {
+	return await new Promise<boolean>((resolve) => {
+		const req = http.request(
+			{ host: "127.0.0.1", port, path: "/shutdown", method: "POST", timeout: 1000, agent: false },
+			(res) => {
+				res.resume();
+				resolve(res.statusCode === 200);
+			},
+		);
+		req.on("error", () => resolve(false));
+		req.on("timeout", () => {
+			req.destroy();
+			resolve(false);
+		});
+		req.end();
+	});
+}
+
+function openBrowser(url: string): void {
+	const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+	const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+	try {
+		spawn(command, args, { detached: true, stdio: "ignore" }).unref();
+	} catch {
+		// 打不开不算失败：地址会告知用户，手动点一样
+	}
+}
+
+/** `/orders web`：没有在跑的就起一个，然后开浏览器；`stop` 把常驻的那个收掉 */
+async function handleWeb(sub: string, ctx: ExtensionContext): Promise<void> {
+	const port = webPort();
+	const url = `http://127.0.0.1:${port}/`;
+	if (sub === "stop") {
+		if (await webStop(port)) {
+			// 等它真退再报：立刻回报会撞上退出中的服务，用户接着敲 web 就误判成「已在跑」
+			for (let i = 0; i < 10 && (await webAlive(port, 200)); i++) await sleep(100);
+			ctx.ui.notify(`看板已停（端口 ${port}）`, "info");
+			return;
+		}
+		ctx.ui.notify(`端口 ${port} 上没有在跑的看板`, "warning");
+		return;
+	}
+	if (await webAlive(port)) {
+		openBrowser(url);
+		ctx.ui.notify(`看板已在跑，已打开浏览器：${url}`, "info");
+		return;
+	}
+
+	try {
+		const serve = fileURLToPath(new URL("./web/serve.ts", import.meta.url));
+		const log = fs.openSync(WEB_LOG, "a");
+		spawn(process.execPath, [serve, "--port", String(port), "--open"], {
+			cwd: ctx.cwd, // 默认扫描根取这里，看板里就有当前项目
+			detached: true,
+			stdio: ["ignore", log, log],
+		}).unref();
+		fs.closeSync(log);
+	} catch (error) {
+		ctx.ui.notify(`看板起不来：${describeError(error)}`, "warning");
+		return;
+	}
+
+	// 等它就绪：起来了才敢说「已打开」，没起来就把日志尾巴给用户
+	for (let i = 0; i < 20; i++) {
+		await sleep(150);
+		if (await webAlive(port)) {
+			ctx.ui.notify(`看板起在 ${url}，浏览器随后打开。停：/orders web stop`, "info");
+			return;
+		}
+	}
+	ctx.ui.notify(`看板没起来，日志（${WEB_LOG}）尾部：\n${tailLog()}`, "warning");
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function tailLog(): string {
+	try {
+		return fs.readFileSync(WEB_LOG, "utf8").trimEnd().split("\n").slice(-8).join("\n");
+	} catch {
+		return "（没有日志）";
+	}
+}
 
 const ContentEntrySchema = Type.Object({
 	name: Type.String({ description: "内容名称，同一工单内唯一，如需求、方案或验证" }),
@@ -609,9 +725,13 @@ export default function (pi: ExtensionAPI) {
 	// ── 命令 ────────────────────────────────────────
 
 	pi.registerCommand("orders", {
-		description: "看当前项目的在办工单（用法：/orders [ready|stale|all|doctor]）",
+		description: "看工单（/orders [ready|stale|mine|all|doctor|web]；web 在浏览器里跨项目看，web stop 停）",
 		handler: async (args, ctx) => {
 			const mode = args.trim();
+			if (mode === "web" || mode.startsWith("web ")) {
+				await handleWeb(mode.slice(3).trim(), ctx);
+				return;
+			}
 			try {
 				const text = withDb(ctx, (db) => {
 					if (mode === "ready") return formatList(readyOrders(db), "可开工");

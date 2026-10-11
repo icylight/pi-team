@@ -18,6 +18,21 @@
 - 可用环境变量 `PI_WORK_ORDERS_DB` 指到别处
 - WAL 模式，多会话同写安全；schema 变更走 `PRAGMA user_version`
 
+## 浏览器看板
+
+在 pi 里敲 `/orders web`：起一个本地只读看板（跨项目总览、单条详情的正文与动作记录、内容入口的 md），
+浏览器随后打开；再敲一次只是重新打开页面。
+
+```
+/orders web         # 没有在跑的就起一个，随后打开浏览器
+/orders web stop    # 停掉常驻的那个
+```
+
+- 服务是**独立进程**（默认端口 8787，`PI_WORK_ORDERS_WEB_PORT` 可改）：pi 会话开开关关它还在，多个会话共用同一个
+- 只绑 `127.0.0.1`，库一律**只读**打开。schema 落后的库读不了，页面上会提示去那个项目里跑一次 `/orders` 升级
+- 扫描根默认取当前目录与 `$CODE_ROOT`（缺省 `~/code`）下的一级子目录；端口已占且不是看板时，换 `--port`
+- 直接跑：`node pi-work-orders/web/serve.ts [--port n] [--root <dir>] [--open] [--stop]`
+
 ## 下一步找谁：有序候选
 
 `nextActors` 是一个数组：**第一个是首选，后面是首选不在场时的备选**。
