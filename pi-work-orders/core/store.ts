@@ -19,6 +19,7 @@ import {
 	type ActorContext,
 	type CreateInput,
 	type ListFilter,
+	type ListedOrder,
 	type Order,
 	type OrderView,
 	type Requirement,
@@ -113,7 +114,7 @@ export function getOrder(db: DatabaseSync, id: string): OrderView {
 	return { ...order, dependsOn, blocks, staleDeps };
 }
 
-export function listOrders(db: DatabaseSync, filter: ListFilter = {}): Order[] {
+export function listOrders(db: DatabaseSync, filter: ListFilter = {}): ListedOrder[] {
 	const states = statesOf(db);
 	const clauses: string[] = [];
 	const params: string[] = [];
@@ -140,11 +141,23 @@ export function listOrders(db: DatabaseSync, filter: ListFilter = {}): Order[] {
 	}
 	const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 	const rows = db.prepare(`SELECT * FROM orders ${where} ORDER BY id`).all(...params) as Row[];
-	return rows.map(toOrder);
+	// 依赖清单随列表带出：前置在列表上有一列，不必再写进标题
+	const byOrder = new Map<string, string[]>();
+	if (rows.length) {
+		const ph = rows.map(() => "?").join(",");
+		for (const d of db
+			.prepare(`SELECT order_id, depends_on FROM deps WHERE order_id IN (${ph}) ORDER BY depends_on`)
+			.all(...rows.map((r) => String(r.id))) as Row[]) {
+			const list = byOrder.get(String(d.order_id)) ?? [];
+			list.push(String(d.depends_on));
+			byOrder.set(String(d.order_id), list);
+		}
+	}
+	return rows.map((r) => ({ ...toOrder(r), dependsOn: byOrder.get(String(r.id)) ?? [] }));
 }
 
 /** 依赖已全部收口、可以开工的 */
-export function readyOrders(db: DatabaseSync): Order[] {
+export function readyOrders(db: DatabaseSync): ListedOrder[] {
 	return listOrders(db, { ready: true });
 }
 

@@ -51,6 +51,17 @@ test("依赖未解仍在等待视图，但不计停滞或触发提醒", t => {
 	assert.match(formatList(listOrders(db), undefined, waitingOrders(db)), /等依赖/);
 });
 
+test("列表视图依赖单独成列：有前置显示单号，没有显示占位符", t => {
+	const { db, up, down } = fixture(t);
+	const text = formatList(listOrders(db));
+	assert.match(text, /依赖/);
+	const lineOf = id => text.split("\n").find(line => line.startsWith(id)) ?? "";
+	assert.match(lineOf(down.id), new RegExp(`${up.id}\\s`), "下游的依赖列应显示上游单号");
+	const upLine = lineOf(up.id);
+	assert.equal(upLine.indexOf(up.id), 0, "上游行以自身单号开头");
+	assert.ok(!upLine.slice(1).includes(up.id), "上游没有依赖，依赖列不应出现单号");
+});
+
 test("最后一个前置刚收口时重新开始接手等待，超过阈值才催", t => {
 	const { db, up, down } = fixture(t);
 	t.mock.timers.tick(65 * MINUTE);

@@ -4,11 +4,24 @@
  * 目标是一眼能扫：谁的活、卡在哪、下一步找谁。细节靠 orders_show。
  */
 
-import type { Order, OrderEvent, OrderView, Waiting } from "./types.ts";
+import type { ListedOrder, OrderEvent, OrderView, Waiting } from "./types.ts";
 
 function short(text: string, max = 60): string {
 	const one = text.replace(/\s+/g, " ").trim();
 	return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+}
+
+/** 终端显示宽度：非 ASCII（中日韩、全角符号）按两列算 */
+function width(s: string): number {
+	let w = 0;
+	for (const ch of s) w += (ch.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
+	return w;
+}
+
+/** 按显示宽度右补空格，表头与中文状态、角色名才能对齐 */
+function pad(s: string, n: number): string {
+	const gap = n - width(s);
+	return gap > 0 ? s + " ".repeat(gap) : s;
 }
 
 /** 时长写法：分钟以内给分钟，一小时内给一位小数小时，再往上给小时 */
@@ -22,22 +35,23 @@ export function formatAgo(minutes: number): string {
 /** 有序候选：第一个是首选，其余是备选 */
 function formatActors(actors: string[], width?: number): string {
 	const head = actors[0] ?? "（无）";
-	if (actors.length === 1) return width ? head.padEnd(width) : head;
+	if (actors.length === 1) return width ? pad(head, width) : head;
 	const rest = `（备选 ${actors.slice(1).join(", ")}）`;
-	return width ? (head + rest).padEnd(width) : head + rest;
+	return width ? pad(head + rest, width) : head + rest;
 }
 
-export function formatList(orders: Order[], heading?: string, waiting: Waiting[] = []): string {
+export function formatList(orders: ListedOrder[], heading?: string, waiting: Waiting[] = []): string {
 	if (!orders.length) return heading ? `${heading}：没有匹配的工单` : "没有匹配的工单";
-	const reasons = new Map(waiting.filter(w => w.kind !== "action").map(w => [w.order.id, formatWaitingReason(w)]));
+	const reasons = new Map(waiting.filter((w) => w.kind !== "action").map((w) => [w.order.id, formatWaitingReason(w)]));
 	const lines = orders.map((o) => {
-		const id = o.id.padEnd(6);
-		const state = o.state.padEnd(6);
+		const id = pad(o.id, 6);
+		const state = pad(o.state, 6);
 		const who = formatActors(o.nextActors, 10);
+		const dep = o.dependsOn.length ? short(o.dependsOn.join(", "), 24) : "-";
 		const reason = reasons.get(o.id);
-		return `${id}${state}${who}${short(o.title, 70)}${reason ? `｜${reason}` : ""}`;
+		return `${id}${state}${who}${pad(dep, 14)}${short(o.title, 70)}${reason ? `｜${reason}` : ""}`;
 	});
-	const head = `${"id".padEnd(6)}${"状态".padEnd(6)}${"下一步找".padEnd(10)}标题`;
+	const head = `${pad("id", 6)}${pad("状态", 6)}${pad("下一步找", 10)}${pad("依赖", 14)}标题`;
 	const body = [head, ...lines].join("\n");
 	return heading ? `${heading}（${orders.length} 条）\n${body}` : body;
 }
@@ -80,8 +94,12 @@ export function formatHistory(events: OrderEvent[]): string {
 }
 
 export function formatWaitingReason(w: Waiting): string {
-	if (w.kind === "dependency") return `等依赖：${w.dependencies.map(dep => `${dep.id} ${dep.state}`).join("、")}`;
-	if (w.kind === "decision") return `上游已取消，需人工裁定：${w.dependencies.filter(dep => dep.cancelled).map(dep => dep.id).join("、")}`;
+	if (w.kind === "dependency") return `等依赖：${w.dependencies.map((dep) => `${dep.id} ${dep.state}`).join("、")}`;
+	if (w.kind === "decision")
+		return `上游已取消，需人工裁定：${w.dependencies
+			.filter((dep) => dep.cancelled)
+			.map((dep) => dep.id)
+			.join("、")}`;
 	return "";
 }
 
@@ -91,15 +109,14 @@ export function formatWaiting(items: Waiting[], heading?: string, now = Date.now
 	const lines = [...items]
 		.sort((a, b) => Date.parse(a.since) - Date.parse(b.since))
 		.map((w) => {
-			const waited = w.kind === "dependency" ? "不计催办" : formatAgo(Math.max(0, (now - Date.parse(w.since)) / 60_000));
+			const waited =
+				w.kind === "dependency" ? "不计催办" : formatAgo(Math.max(0, (now - Date.parse(w.since)) / 60_000));
 			const o = w.order;
 			const reason = formatWaitingReason(w);
 			return `${o.id.padEnd(6)}${o.state.padEnd(6)}${waited.padStart(7)}  ${short(o.title, 60)}${reason ? `｜${reason}` : ""}`;
 		});
 	const head = `${"id".padEnd(6)}${"状态".padEnd(6)}${"等了".padStart(7)}  标题`;
-	return [heading ? `${heading}（${items.length} 条）` : undefined, head, ...lines]
-		.filter(Boolean)
-		.join("\n");
+	return [heading ? `${heading}（${items.length} 条）` : undefined, head, ...lines].filter(Boolean).join("\n");
 }
 
 /** 错误统一成一句，别把栈甩给 agent */

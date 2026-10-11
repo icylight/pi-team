@@ -118,6 +118,11 @@ export interface Order {
 	revision: number;
 }
 
+/** 列表行：订单 + 上游依赖清单（展示用；下游与失效判定只在 getOrder 里算） */
+export interface ListedOrder extends Order {
+	dependsOn: string[];
+}
+
 export interface OrderView extends Order {
 	/** 这条依赖谁 */
 	dependsOn: string[];
