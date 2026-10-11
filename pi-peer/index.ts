@@ -28,7 +28,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	CONFIG_DIR_NAME,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type MessageRenderer,
+} from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
@@ -57,8 +62,11 @@ import {
 
 /** 项目级配置与「生效值从哪来」都在 config.ts，这里只留用法 */
 
-/** 自定义消息类型（TUI 渲染 + 辨识来源用） */
-const CUSTOM_TYPE = "peer";
+/**
+ * 旧消息的类型名。新消息改用来源名当类型（会话 tree 拿类型名当标签），
+ * 这里只为重启后重放旧会话条目时还认得出它们。
+ */
+const LEGACY_PEER_TYPE = "peer";
 const HEARTBEAT_MS = 5_000;
 const POLL_MS = 2_000;
 const DRAIN_DEBOUNCE_MS = 50;
@@ -105,6 +113,14 @@ export default function (pi: ExtensionAPI) {
 
 		const root = process.env.PI_PEER_ROOT?.trim() || path.join(os.homedir(), CONFIG_DIR_NAME, "peers");
 		store = new PeerStore(root, ctx.cwd);
+
+		// 会话里的历史 peer 消息也要按来源渲染（重启后重放）：重放发生在 session_start
+		// 之后，这里按条目补注册，否则历史气泡会落到默认样式。
+		for (const entry of ctx.sessionManager.getEntries()) {
+			if (entry.type !== "custom_message") continue;
+			const details = entry.details as { from?: string; fromName?: string } | undefined;
+			if (details?.from && details.fromName) ensureMessageRenderer(entry.customType);
+		}
 
 		const key = newSessionKey();
 		const restoredRole = restoreRole(ctx);
@@ -352,20 +368,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── TUI 渲染：把注入的消息画成对话气泡 ────────────
 
-	pi.registerMessageRenderer(CUSTOM_TYPE, (message, options, theme) => {
-		const details = (message.details ?? {}) as { fromName?: string; fromModel?: string };
-		const head =
-			theme.fg("accent", `⇄ ${details.fromName ?? "peer"}`) + theme.fg("dim", ` · ${details.fromModel ?? "?"}`);
-		const content =
-			typeof message.content === "string"
-				? message.content
-				: (message.content ?? [])
-						.filter((block) => block.type === "text")
-						.map((block) => block.text)
-						.join("\n");
-		const body = content.replace(/^\[peer\][^\n]*\n\n?/, "");
-		return new Text(`${head}\n${body}`, options.outputPad, 0);
-	});
+	pi.registerMessageRenderer(LEGACY_PEER_TYPE, renderPeerMessage);
 
 	// ── 工具 ────────────────────────────────────────
 
@@ -378,7 +381,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"用 peer_list 查看当前文件夹下其他 pi 会话；用 peer_send 给它们发消息（对方会被唤醒并看到正文）。",
 			'peer_list 传 scope="all" 看其他项目的会话；发消息时写「项目/名字」当目标。',
-			"收到 [peer] 消息后只在确实需要回答或行动时才回复；对方只是通报进度或结论时不要回确认，避免两个会话互相刷屏。",
+			"收到 [peer …] 消息后只在确实需要回答或行动时才回复；对方只是通报进度或结论时不要回确认，避免两个会话互相刷屏。",
 		],
 		parameters: Type.Object({
 			all: Type.Optional(Type.Boolean({ description: "包含已离线成员（默认只列在线的）" })),
@@ -802,21 +805,49 @@ function drainAndDeliver(): void {
 	}
 }
 
+/**
+ * 消息类型名 = 来源名，TUI 气泡与 session tree 都按它显示「谁发来的」。
+ * 来源是收信时才出现的，所以按需注册；注册表是 Map，重复注册只是覆盖，
+ * 不另设已注册集合——扩展重载后新实例的表是空的，缓存会把来源永久挡在外面。
+ */
+function ensureMessageRenderer(source: string): void {
+	api?.registerMessageRenderer(source, renderPeerMessage);
+}
+
+const renderPeerMessage: MessageRenderer = (message, options, theme) => {
+	const details = (message.details ?? {}) as { fromName?: string; fromModel?: string };
+	const head =
+		theme.fg("accent", `⇄ ${details.fromName ?? "peer"}`) + theme.fg("dim", ` · ${details.fromModel ?? "?"}`);
+	const content =
+		typeof message.content === "string"
+			? message.content
+			: (message.content ?? [])
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join("\n");
+	// 剥掉正文首行的来源标记（气泡头已经写了）；新旧两代的标记行都认
+	const body = content.replace(/^\[peer[^\n]*\n\n?/, "");
+	return new Text(`${head}\n${body}`, options.outputPad, 0);
+};
+
 function deliver(msg: PeerMessage): void {
 	if (!api) return;
 
+	// 首行给模型认来源（custom 消息转成 LLM 输入时是普通 user 文本，没有额外标记）；
+	// 长度压到一行，免得 session tree 里正文被元信息挤掉。
 	const body = [
-		`[peer] 来自「${msg.fromName}」（${msg.fromModel ?? "未知模型"}）的消息`,
+		`[peer ${msg.fromName}]`,
 		"",
 		msg.text,
 		"",
-		`—— 需要回复时用：peer_send(to="${msg.fromName}", text="…", replyTo="${msg.id}")`,
+		`—— ${msg.fromName}（${msg.fromModel ?? "未知模型"}）是另一个 pi 会话；需要回复时用：peer_send(to="${msg.fromName}", text="…", replyTo="${msg.id}")`,
 	];
 
+	ensureMessageRenderer(msg.fromName);
 	try {
 		api?.sendMessage(
 			{
-				customType: CUSTOM_TYPE,
+				customType: msg.fromName,
 				content: body.join("\n"),
 				display: true,
 				details: {

@@ -20,6 +20,7 @@ function mountPeer(cwd: string, peerRoot: string) {
 	const renderers = new Map();
 	const notes: string[] = [];
 	const entries: { type: string; customType: string; data: unknown }[] = [];
+	const sent: { message: { customType: string; content: unknown }; options: unknown }[] = [];
 	const modelCalls: string[] = [];
 	const thinkingCalls: string[] = [];
 	const pi = {
@@ -32,6 +33,8 @@ function mountPeer(cwd: string, peerRoot: string) {
 		registerCommand: (name: string, options: unknown) => commands.set(name, options),
 		registerMessageRenderer: (name: string, renderer: unknown) => renderers.set(name, renderer),
 		appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
+		sendMessage: (message: { customType: string; content: unknown }, options: unknown) =>
+			sent.push({ message, options }),
 		on: (name: string, fn: unknown) => handlers.set(name, fn),
 		getSessionName: () => "sender",
 		events: {
@@ -58,6 +61,7 @@ function mountPeer(cwd: string, peerRoot: string) {
 		renderers,
 		notes,
 		entries,
+		sent,
 		modelCalls,
 		thinkingCalls,
 		restore() {
@@ -91,6 +95,53 @@ test("peer 渲染器提取文本块并跳过图片", () => {
 			component.render(80).map((line: string) => line.trimEnd()),
 			["⇄ dev · test/model", "第一段", "第二段"],
 		);
+	} finally {
+		peer.restore();
+	}
+});
+
+test("收到消息：类型名用来源名，标注行压到一行", async () => {
+	const { cwd, peerRoot, store } = tmpPair();
+	const peer = mountPeer(cwd, peerRoot);
+	try {
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
+		const selfKey = fs.readdirSync(store.membersDir).map((file) => file.replace(/\.json$/, ""))[0];
+		store.send({
+			id: "msg-1",
+			from: "9000-aaaa",
+			fromName: "dev",
+			fromModel: "test/model",
+			to: selfKey,
+			thread: "msg-1",
+			text: "T188 已由 qa 收口",
+			ts: Date.now(),
+		});
+		// 收信靠轮询兜底（watch 只装在启动时已存在的目录上），等一个轮询周期
+		await new Promise((resolve) => setTimeout(resolve, 2500));
+		assert.equal(peer.sent.length, 1);
+		assert.equal(peer.sent[0].message.customType, "dev", "tree 与气泡都拿类型名当来源标签");
+		assert.match(String(peer.sent[0].message.content), /^\[peer dev\]\n\nT188 已由 qa 收口/);
+		assert.ok(peer.renderers.has("dev"), "来源类型要当场注册，否则气泡落到默认样式");
+	} finally {
+		peer.restore();
+	}
+});
+
+test("重启后按历史条目补注册来源类型", async () => {
+	const { cwd, peerRoot } = tmpPair();
+	const peer = mountPeer(cwd, peerRoot);
+	try {
+		const history = [
+			{ type: "custom_message", customType: "dev", details: { from: "9000-aaaa", fromName: "dev" } },
+			{ type: "custom_message", customType: "peer", details: { from: "9000-aaaa", fromName: "qa" } },
+			{ type: "custom_message", customType: "other-ext" },
+		];
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.(
+			{},
+			ctxFor(cwd, [], history),
+		);
+		assert.ok(peer.renderers.has("dev"), "历史消息重放前要认出来源");
+		assert.ok(!peer.renderers.has("other-ext"), "别的扩展的自定义消息不该被 peer 接管");
 	} finally {
 		peer.restore();
 	}
@@ -144,14 +195,14 @@ function liveMember(peerRoot: string, cwd: string, key: string, name: string, ex
 }
 
 /** peer 的 session_start 要读 cwd / 模型 / 会话文件，给个够用的壳 */
-function ctxFor(cwd: string, notes: string[] = []) {
+function ctxFor(cwd: string, notes: string[] = [], history: unknown[] = []) {
 	return {
 		cwd,
 		hasUI: true,
 		model: { provider: "test", id: "model" },
 		sessionManager: {
 			getSessionFile: () => path.join(cwd, "session.jsonl"),
-			getEntries: () => [],
+			getEntries: () => history,
 		},
 		ui: {
 			notify: (message: string) => notes.push(message),
