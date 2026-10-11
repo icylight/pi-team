@@ -376,10 +376,10 @@ export default function (pi: ExtensionAPI) {
 		name: "peer_list",
 		label: "Peer List",
 		description:
-			'列出同目录其他 pi 会话（可互通的同伴）：名称、模型、会话 id、状态。scope="all" 连其他项目的会话一起列。',
-		promptSnippet: "列出同目录其他 pi 会话",
+			'列出同目录的 pi 会话（含自己，自己在第一行）：名称、模型、会话 id、状态。scope="all" 连其他项目的会话一起列。',
+		promptSnippet: "列出同目录 pi 会话（含自己）",
 		promptGuidelines: [
-			"用 peer_list 查看当前文件夹下其他 pi 会话；用 peer_send 给它们发消息（对方会被唤醒并看到正文）。",
+			"用 peer_list 查看当前文件夹下的 pi 会话（第一行是自己）；用 peer_send 给其他会话发消息（对方会被唤醒并看到正文）。",
 			'peer_list 传 scope="all" 看其他项目的会话；发消息时写「项目/名字」当目标。',
 			"收到 [peer …] 消息后只在确实需要回答或行动时才回复；对方只是通报进度或结论时不要回确认，避免两个会话互相刷屏。",
 		],
@@ -394,38 +394,37 @@ export default function (pi: ExtensionAPI) {
 
 			// scope=all 时一次扫完全部桶；本项目那部分从这里分出来，不再单独读一次
 			const scan = scopeAll ? store.listAllMembers({ includeStale: true }) : undefined;
-			const own = (scan ? scan.filter((s) => s.bucket === store!.dir) : store.listScoped({ includeStale })).filter(
-				(s) => s.member.key !== self!.key,
-			);
+			const ownAll = scan ? scan.filter((s) => s.bucket === store!.dir) : store.listScoped({ includeStale });
+			const me = ownAll.find((s) => s.member.key === self!.key);
+			const own = ownAll.filter((s) => s.member.key !== self!.key);
 			const foreign = (scan ?? []).filter((s) => s.bucket !== store!.dir && s.member.key !== self!.key);
 
 			// 「在忙」只是提示：手动发消息照样能发，会自动插到对方当前这轮之后
-			const render = (m: Member, live: boolean, label: string) => {
+			const render = (m: Member, live: boolean, label: string, isSelf = false) => {
 				const age = Math.round((Date.now() - m.lastSeen) / 1000);
+				const tag = isSelf ? (m.role ? `（我，角色：${m.role}）` : "（我）") : m.role ? `（角色：${m.role}）` : "";
 				return (
-					`- ${label}${m.role ? `（角色：${m.role}）` : ""}｜${m.model}｜${
-						live ? (isBusy(m) ? "在线·在忙" : "在线·空闲") : "离线"
-					}` + `｜id=${m.key}｜pid=${m.pid}｜${age}s 前心跳`
+					`- ${label}${tag}｜${m.model}｜${live ? (isBusy(m) ? "在线·在忙" : "在线·空闲") : "离线"}` +
+					`｜id=${m.key}｜pid=${m.pid}｜${age}s 前心跳`
 				);
 			};
 
-			if (own.length === 0 && foreign.length === 0) {
-				return text(
-					`当前文件夹没有其他 pi 会话。\n在新终端 cd 到同一目录再开一个 pi，或用 /peer-new 在当前终端新建（可带角色）。\n（我自己的会话 id：${self.key}，名称：${self.name}${self.role ? `，角色：${self.role}` : ""}）`,
-				);
-			}
-
+			// 自己排第一：要跟别人说话，先得知道自己在这套寻址里叫什么
 			const lines = [
+				...(me ? [render(me.member, true, me.member.name, true)] : []),
 				...own.map((s) => render(s.member, s.live, s.member.name)),
 				...foreign.map((s) => render(s.member, s.live, `${s.project}/${s.member.name}`)),
 			];
+			if (own.length === 0 && foreign.length === 0) {
+				lines.push("（同目录暂无其他会话：新终端 cd 到同目录再开一个 pi，或用 /peer-new 新建，可带角色）");
+			}
 			if (!scopeAll) {
 				const others = store.listAllMembers().filter((s) => s.bucket !== store!.dir);
 				if (others.length > 0) {
 					lines.push(`（另有 ${others.length} 个其他项目的在线会话，peer_list 传 scope="all" 看）`);
 				}
 			}
-			return text(`同目录其他会话（${own.length + foreign.length}）：\n${lines.join("\n")}`);
+			return text(`同目录会话（${(me ? 1 : 0) + own.length + foreign.length}）：\n${lines.join("\n")}`);
 		},
 	});
 
@@ -524,30 +523,38 @@ export default function (pi: ExtensionAPI) {
 	// ── 命令 ────────────────────────────────────────
 
 	pi.registerCommand("peers", {
-		description: "列出同目录其他 pi 会话（/peers all 连其他项目一起列）",
+		description: "列出同目录 pi 会话（含自己；/peers all 连其他项目一起列）",
 		handler: async (args, ctx) => {
 			if (!store || !self) {
 				ctx.ui.notify("pi-peer 未启用", "warning");
 				return;
 			}
 			const scopeAll = args.trim() === "all";
-			const own = store.listScoped().filter((s) => s.member.key !== self!.key);
+			const selfKey = self.key;
+			const ownAll = store.listScoped();
+			const me = ownAll.find((s) => s.member.key === selfKey);
+			const own = ownAll.filter((s) => s.member.key !== selfKey);
 			const foreignAll = store.listAllMembers().filter((s) => s.bucket !== store!.dir && s.member.key !== self!.key);
+			const row = (member: Member, label: string, isSelf = false) =>
+				`${label}${
+					isSelf
+						? member.role
+							? `（我，角色：${member.role}）`
+							: "（我）"
+						: member.role
+							? `（角色：${member.role}）`
+							: ""
+				} · ${member.model} · id=${member.key}`;
 			const lines = [
-				...own.map(
-					(s) =>
-						`${s.member.name}${s.member.role ? `（角色：${s.member.role}）` : ""} · ${s.member.model} · id=${s.member.key}`,
-				),
-				...(scopeAll
-					? foreignAll.map((s) => `${s.project}/${s.member.name} · ${s.member.model} · id=${s.member.key}`)
-					: []),
+				...(me ? [row(me.member, me.member.name, true)] : []),
+				...own.map((s) => row(s.member, s.member.name)),
+				...(scopeAll ? foreignAll.map((s) => row(s.member, `${s.project}/${s.member.name}`)) : []),
 			];
+			if (own.length === 0 && foreignAll.length === 0) {
+				lines.push("（同目录暂无其他会话：新终端 cd 到同目录再开一个 pi，或用 /peer-new 新建，可带角色）");
+			}
 			if (!scopeAll && foreignAll.length > 0) {
 				lines.push(`（另有 ${foreignAll.length} 个其他项目的在线会话，/peers all 看）`);
-			}
-			if (lines.length === 0) {
-				ctx.ui.notify(`我是 ${self.name}（${self.key}）；同目录暂无其他会话`, "info");
-				return;
 			}
 			ctx.ui.notify(lines.join("\n"), "info");
 		},

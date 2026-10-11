@@ -371,13 +371,29 @@ test("peer_list 列得出同项目与跨项目的会话，忙闲看着对", asyn
 		liveMember(peerRoot, otherCwd, "9500-ffff", "qa", { busy: false });
 
 		const own = await callTool(peer.tools, "peer_list", {}, cwd);
+		assert.match(own, /sender（我）/, "自己要列出来，否则不知道本会话叫什么");
+		assert.ok(own.indexOf("sender") < own.indexOf("dev"), "自己排第一行");
 		assert.match(own, /dev/);
 		assert.match(own, /在线·在忙/, "忙闲要渲染出来，不是只列名字");
 
 		const all = await callTool(peer.tools, "peer_list", { scope: "all" }, cwd);
+		assert.match(all, /sender（我）/);
 		assert.match(all, /dev/);
 		assert.match(all, /other-project\/qa/, "跨项目要带项目前缀");
 		assert.match(all, /在线·空闲/);
+	} finally {
+		peer.restore();
+	}
+});
+
+test("只有自己时 peer_list 也列自己，并提示怎么拉人", async () => {
+	const { cwd, peerRoot } = tmpPair();
+	const peer = mountPeer(cwd, peerRoot);
+	try {
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
+		const only = await callTool(peer.tools, "peer_list", {}, cwd);
+		assert.match(only, /sender（我）/);
+		assert.match(only, /同目录暂无其他会话/);
 	} finally {
 		peer.restore();
 	}
