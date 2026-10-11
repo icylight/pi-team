@@ -11,22 +11,7 @@
  */
 
 import type { DatabaseSync } from "node:sqlite";
-import {
-	BASIS_REQUIRED,
-	LedgerError,
-	ROLES,
-	STALE_MINUTES,
-	type ActorContext,
-	type CreateInput,
-	type ListFilter,
-	type ListedOrder,
-	type Order,
-	type OrderView,
-	type Requirement,
-	type StateRole,
-	type UpdateInput,
-	type Waiting,
-} from "./types.ts";
+import { normalizeContents } from "./contents.ts";
 import {
 	getMeta,
 	idPrefixOf,
@@ -40,9 +25,23 @@ import {
 	statesOf,
 	transitionsOf,
 } from "./schema.ts";
-
+import {
+	type ActorContext,
+	BASIS_REQUIRED,
+	type CreateInput,
+	LedgerError,
+	type ListedOrder,
+	type ListFilter,
+	type Order,
+	type OrderView,
+	type Requirement,
+	ROLES,
+	STALE_MINUTES,
+	type StateRole,
+	type UpdateInput,
+	type Waiting,
+} from "./types.ts";
 import { describeWaiting } from "./waiting.ts";
-import { normalizeContents } from "./contents.ts";
 
 type Row = Record<string, unknown>;
 
@@ -103,9 +102,9 @@ export function getOrder(db: DatabaseSync, id: string): OrderView {
 	const dependsOn = (
 		db.prepare("SELECT depends_on FROM deps WHERE order_id=? ORDER BY depends_on").all(id) as Row[]
 	).map((r) => String(r.depends_on));
-	const blocks = (
-		db.prepare("SELECT order_id FROM deps WHERE depends_on=? ORDER BY order_id").all(id) as Row[]
-	).map((r) => String(r.order_id));
+	const blocks = (db.prepare("SELECT order_id FROM deps WHERE depends_on=? ORDER BY order_id").all(id) as Row[]).map(
+		(r) => String(r.order_id),
+	);
 	const cancelled = stateOf(db, "cancelled");
 	const staleDeps = dependsOn.filter((up) => {
 		const row = db.prepare("SELECT state FROM orders WHERE id=?").get(up) as Row | undefined;
@@ -380,9 +379,7 @@ export function updateOrder(
 	if (!ctx.reason?.trim()) throw new LedgerError("改状态或范围必须写理由");
 	const old = mustFind(db, id);
 	if (expectedRevision != null && old.revision !== expectedRevision) {
-		throw new LedgerError(
-			`版本冲突：库里是 revision=${old.revision}，你手上是 ${expectedRevision}；请重读工单再改`,
-		);
+		throw new LedgerError(`版本冲突：库里是 revision=${old.revision}，你手上是 ${expectedRevision}；请重读工单再改`);
 	}
 
 	// 空串或全空白一律当作「没传」：调用方习惯用 "" 表示这次不改这个字段，
@@ -395,11 +392,7 @@ export function updateOrder(
 	const nextRole = roleOf(db, targetState);
 	// 认领＝把状态推到「在做」；这时执行者就是操作者本人，不用再手传
 	const claiming = nextRole === "active" && old.state !== targetState;
-	const nextActors = patch.nextActors
-		? normalizeActors(patch.nextActors)
-		: claiming
-			? [ctx.actor]
-			: old.nextActors;
+	const nextActors = patch.nextActors ? normalizeActors(patch.nextActors) : claiming ? [ctx.actor] : old.nextActors;
 	if (patch.nextActors) assertActorNames(nextActors);
 
 	// 先替换（如果给了），再拼接追加段：追加永远不覆盖旧句
@@ -425,28 +418,28 @@ export function updateOrder(
 		}
 	}
 	if (BASIS_REQUIRED.includes(nextRole) && !next.closingBasis?.trim()) {
-		throw new LedgerError(
-			nextRole === "done" ? "结单必须给终止依据（证据指针）" : "取消必须给理由或取代它的单号",
-		);
+		throw new LedgerError(nextRole === "done" ? "结单必须给终止依据（证据指针）" : "取消必须给理由或取代它的单号");
 	}
 
 	db.exec("BEGIN IMMEDIATE;");
 	try {
-		const result = db.prepare(
-			`UPDATE orders SET title=?, body=?, contents=?, state=?, next_actors=?, closing_basis=?,
+		const result = db
+			.prepare(
+				`UPDATE orders SET title=?, body=?, contents=?, state=?, next_actors=?, closing_basis=?,
 			 updated_at=?, revision=revision+1 WHERE id=? AND (? IS NULL OR revision=?)`,
-		).run(
-			next.title,
-			next.body,
-			JSON.stringify(next.contents),
-			next.state,
-			JSON.stringify(nextActors),
-			next.closingBasis,
-			now(),
-			id,
-			expectedRevision ?? null,
-			expectedRevision ?? null,
-		);
+			)
+			.run(
+				next.title,
+				next.body,
+				JSON.stringify(next.contents),
+				next.state,
+				JSON.stringify(nextActors),
+				next.closingBasis,
+				now(),
+				id,
+				expectedRevision ?? null,
+				expectedRevision ?? null,
+			);
 		if (Number(result.changes) !== 1) {
 			throw new LedgerError("版本冲突：工单已被其他会话修改；请重读工单再改");
 		}
@@ -476,12 +469,7 @@ export function updateOrder(
 }
 
 /** 范围修订：追加一段，不覆盖旧句（旧句留在正文里，可追溯） */
-export function appendBody(
-	db: DatabaseSync,
-	id: string,
-	section: string,
-	ctx: ActorContext,
-): OrderView {
+export function appendBody(db: DatabaseSync, id: string, section: string, ctx: ActorContext): OrderView {
 	return updateOrder(db, id, { appendBody: section }, { ...ctx, reason: ctx.reason || "正文追加修订" });
 }
 

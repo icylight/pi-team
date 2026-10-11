@@ -1,9 +1,8 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
+import { test } from "node:test";
 import { eventsOf, initLedger, openLedger, SCHEMA_VERSION, stateOf, statesOf } from "../core/schema.ts";
 import {
 	addDep,
@@ -23,7 +22,6 @@ import {
 	waitedMinutes,
 	waitingOrders,
 } from "../core/store.ts";
-import { buildDigest } from "../core/digest.ts";
 
 /**
  * 把一条单的动作记录整体往前推 N 分钟，用来造「已经等了很久」的场景。
@@ -48,15 +46,7 @@ const owner = { actor: "owner", reason: "测试" };
 test("建库后状态集是默认七态", () => {
 	const { db } = freshLedger();
 	const states = statesOf(db);
-	assert.deepEqual(Object.values(states), [
-		"待认领",
-		"在做",
-		"待复核",
-		"被打回",
-		"阻塞",
-		"已收口",
-		"已取消",
-	]);
+	assert.deepEqual(Object.values(states), ["待认领", "在做", "待复核", "被打回", "阻塞", "已收口", "已取消"]);
 	db.close();
 });
 
@@ -73,10 +63,7 @@ test("工单自动编号，按前缀递增", () => {
 test("转换按角色校验：待认领不能直接收口", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "x", nextActors: ["dev"] }, owner);
-	assert.throws(
-		() => updateOrder(db, a.id, { state: stateOf(db, "done") }, owner),
-		/不合法转换/,
-	);
+	assert.throws(() => updateOrder(db, a.id, { state: stateOf(db, "done") }, owner), /不合法转换/);
 	db.close();
 });
 
@@ -90,12 +77,7 @@ test("认领走 待认领→在做，且一个角色同时只能有一条在做"
 		/已有在做的一条/,
 	);
 	// 换个人接就不冲突
-	updateOrder(
-		db,
-		b.id,
-		{ state: stateOf(db, "active"), nextActors: ["qa"] },
-		{ actor: "qa", reason: "qa 接" },
-	);
+	updateOrder(db, b.id, { state: stateOf(db, "active"), nextActors: ["qa"] }, { actor: "qa", reason: "qa 接" });
 	db.close();
 });
 
@@ -129,10 +111,7 @@ test("结单必须带终止依据，取消必须给理由", () => {
 	assert.equal(closed.closingBasis, "cargo test: 412 passed");
 
 	const b = createOrder(db, { title: "b", nextActors: ["dev"] }, owner);
-	assert.throws(
-		() => updateOrder(db, b.id, { state: stateOf(db, "cancelled") }, owner),
-		/取消必须给理由/,
-	);
+	assert.throws(() => updateOrder(db, b.id, { state: stateOf(db, "cancelled") }, owner), /取消必须给理由/);
 	db.close();
 });
 
@@ -158,12 +137,7 @@ test("ready 只列依赖已收口的", () => {
 
 	updateOrder(db, up.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "接" });
 	updateOrder(db, up.id, { state: stateOf(db, "review") }, { actor: "dev", reason: "交" });
-	updateOrder(
-		db,
-		up.id,
-		{ state: stateOf(db, "done"), closingBasis: "有证据" },
-		{ actor: "qa", reason: "过" },
-	);
+	updateOrder(db, up.id, { state: stateOf(db, "done"), closingBasis: "有证据" }, { actor: "qa", reason: "过" });
 	assert.deepEqual(
 		readyOrders(db).map((o) => o.id),
 		[down.id],
@@ -236,13 +210,7 @@ test("追加与字段写入同事务：字段那步失败，正文与 revision �
 	const before = getOrder(db, a.id);
 	// 收口缺终止依据 → 走到写库前抛错；这次调用里还带着正文追加
 	assert.throws(
-		() =>
-			updateOrder(
-				db,
-				a.id,
-				{ appendBody: "## 范围修订\n追加这段", state: stateOf(db, "done") },
-				owner,
-			),
+		() => updateOrder(db, a.id, { appendBody: "## 范围修订\n追加这段", state: stateOf(db, "done") }, owner),
 		/结单必须给终止依据/,
 	);
 	const after = getOrder(db, a.id);
@@ -274,7 +242,9 @@ test("删依赖后下游可以重新开工", () => {
 	const down = createOrder(db, { title: "下游", nextActors: ["dev"], dependsOn: [up.id] }, owner);
 	removeDep(db, down.id, up.id, { actor: "owner", reason: "改口径" });
 	assert.deepEqual(
-		readyOrders(db).map((o) => o.id).sort(),
+		readyOrders(db)
+			.map((o) => o.id)
+			.sort(),
 		[up.id, down.id].sort(),
 	);
 	assert.equal(listOrders(db).length, 2);
@@ -302,12 +272,7 @@ test("候选去重、去空，且不能为空数组", () => {
 test("认领时收敛成执行者本人，备选不再挂着", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "a", nextActors: ["dev", "qa"] }, owner);
-	const claimed = updateOrder(
-		db,
-		a.id,
-		{ state: stateOf(db, "active") },
-		{ actor: "qa", reason: "dev 不在，qa 接" },
-	);
+	const claimed = updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "qa", reason: "dev 不在，qa 接" });
 	assert.deepEqual(claimed.nextActors, ["qa"]);
 	db.close();
 });
@@ -424,14 +389,8 @@ test("停滞判定按阈值切，可开工没人接单独成列", () => {
 
 test("下一步找谁拒绝会话 key：重启即失效的指向不许落库", () => {
 	const { db } = freshLedger();
-	assert.throws(
-		() => createOrder(db, { title: "甲", nextActors: ["1423-311c"] }, owner),
-		/要写角色名/,
-	);
-	assert.throws(
-		() => createOrder(db, { title: "甲", nextActors: ["example-project-1423"] }, owner),
-		/要写角色名/,
-	);
+	assert.throws(() => createOrder(db, { title: "甲", nextActors: ["1423-311c"] }, owner), /要写角色名/);
+	assert.throws(() => createOrder(db, { title: "甲", nextActors: ["example-project-1423"] }, owner), /要写角色名/);
 	assert.throws(
 		() =>
 			updateOrder(

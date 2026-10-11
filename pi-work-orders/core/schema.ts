@@ -12,14 +12,14 @@ import { DatabaseSync } from "node:sqlite";
 import {
 	DEFAULT_STATES,
 	DEFAULT_TRANSITIONS,
-	LedgerError,
-	ROLES,
-	WAITING_ROLES,
 	type EventKind,
+	LedgerError,
 	type Meta,
 	type OrderEvent,
 	type Requirement,
+	ROLES,
 	type StateRole,
+	WAITING_ROLES,
 } from "./types.ts";
 
 export const SCHEMA_VERSION = 4;
@@ -175,9 +175,7 @@ export function now(): string {
 // ── meta 读写 ────────────────────────────────────────
 
 export function getMeta<T>(db: DatabaseSync, key: keyof Meta): T | undefined {
-	const row = db.prepare("SELECT value_json FROM meta WHERE key=?").get(key) as
-		| { value_json: string }
-		| undefined;
+	const row = db.prepare("SELECT value_json FROM meta WHERE key=?").get(key) as { value_json: string } | undefined;
 	return row ? (JSON.parse(row.value_json) as T) : undefined;
 }
 

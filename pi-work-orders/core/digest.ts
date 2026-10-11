@@ -37,9 +37,9 @@ export function buildDigest(
 	const open = listOrders(db);
 	const waiting = waitingOrders(db);
 	const me = options.me;
-	const mine = me ? waiting.filter(w => w.kind === "action" && w.order.nextActors.includes(me)) : [];
-	const blocked = waiting.filter(w => w.kind === "dependency");
-	const decisions = waiting.filter(w => w.kind === "decision");
+	const mine = me ? waiting.filter((w) => w.kind === "action" && w.order.nextActors.includes(me)) : [];
+	const blocked = waiting.filter((w) => w.kind === "dependency");
+	const decisions = waiting.filter((w) => w.kind === "decision");
 	const stale = staleWaiting(db, staleMinutes, undefined, now);
 	const idle = idleReady(db);
 
@@ -67,15 +67,17 @@ function renderDigest(d: Omit<Digest, "text">, now: number, staleMinutes: number
 
 	if (d.blocked.length) {
 		lines.push(`等依赖的 ${d.blocked.length} 条（不计催办）：`);
-		for (const w of pickOldest(d.blocked, MAX_LINES)) lines.push(`  ${formatWaitingLine(w, now, w.order.nextActors[0])}`);
+		for (const w of pickOldest(d.blocked, MAX_LINES))
+			lines.push(`  ${formatWaitingLine(w, now, w.order.nextActors[0])}`);
 	}
 	if (d.decisions.length) {
 		lines.push(`上游已取消，需人工裁定的 ${d.decisions.length} 条：`);
-		for (const w of pickOldest(d.decisions, MAX_LINES)) lines.push(`  ${formatWaitingLine(w, now, w.order.nextActors[0])}`);
+		for (const w of pickOldest(d.decisions, MAX_LINES))
+			lines.push(`  ${formatWaitingLine(w, now, w.order.nextActors[0])}`);
 	}
 
 	// 已经列出的等待或裁定不重复占用停滞区。
-	const shown = new Set([...d.mine, ...d.decisions].map(w => w.order.id));
+	const shown = new Set([...d.mine, ...d.decisions].map((w) => w.order.id));
 	const others = d.stale.filter((s) => !shown.has(s.order.id));
 	if (others.length) {
 		lines.push(`停滞超 ${staleMinutes}m 的 ${others.length} 条：`);

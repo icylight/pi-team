@@ -6,14 +6,7 @@
  */
 
 /** 状态角色——工具只认角色，不认状态名；状态名由项目在库里声明 */
-export type StateRole =
-	| "claimable"
-	| "active"
-	| "review"
-	| "rework"
-	| "paused"
-	| "done"
-	| "cancelled";
+export type StateRole = "claimable" | "active" | "review" | "rework" | "paused" | "done" | "cancelled";
 
 export const ROLES: readonly StateRole[] = [
 	"claimable",

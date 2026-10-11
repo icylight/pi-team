@@ -1,8 +1,8 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { test } from "node:test";
 
 import {
 	configWarnings,
@@ -179,7 +179,11 @@ test("报告逐项写出来源：项目标签、可用角色、本次角色卡�
 test("声明齐全时，报告里每项都是「配置」来源，没有兜底字样", () => {
 	const { cwd } = project({
 		".pi/peer.json": {
-			group: { name: "ipd", flow: ".pi/flows/ipd.md", roles: { owner: { card: ".pi/characters/owner.md", model: "test/model", thinkingLevel: "high" } } },
+			group: {
+				name: "ipd",
+				flow: ".pi/flows/ipd.md",
+				roles: { owner: { card: ".pi/characters/owner.md", model: "test/model", thinkingLevel: "high" } },
+			},
 		},
 		".pi/characters/owner.md": "我是 owner",
 		".pi/flows/ipd.md": "流程在这里",
@@ -187,7 +191,14 @@ test("声明齐全时，报告里每项都是「配置」来源，没有兜底�
 	const report = describeConfig(load(cwd), { cwd, role: "owner" });
 	assert.deepEqual(
 		report.items.map((item) => `${item.key}:${item.origin.kind}`),
-		["identity:declared", "roles:declared", "role:declared", "model:declared", "thinkingLevel:declared", "flow:declared"],
+		[
+			"identity:declared",
+			"roles:declared",
+			"role:declared",
+			"model:declared",
+			"thinkingLevel:declared",
+			"flow:declared",
+		],
 	);
 	assert.ok(!renderConfigReport(report).includes("兜底："));
 });
@@ -215,7 +226,11 @@ test("配置文件在但字段写错：当场报，不静默按默认值跑", ()
 	const warnings = configWarnings(describeConfig(load(cwd), { cwd }));
 	assert.equal(warnings.length, 2, warnings.join(" / "));
 	assert.match(warnings[0], /group\.name 要写字符串/);
-	assert.match(warnings[1], /项目标签 example-project（group\.name 没写，按目录名）/, "写错了但没说的字段，按兜底生效就说兜底");
+	assert.match(
+		warnings[1],
+		/项目标签 example-project（group\.name 没写，按目录名）/,
+		"写错了但没说的字段，按兜底生效就说兜底",
+	);
 });
 
 test("配置文件在、声明齐全：不出声", () => {

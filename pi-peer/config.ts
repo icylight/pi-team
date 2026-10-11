@@ -121,11 +121,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** 角色表两种写法都收：字符串（角色卡路径）或 { card: 路径 }；写错的一项一条 */
-function parseRoles(
-	raw: unknown,
-	field: string,
-	problems: string[],
-): Record<string, RoleConfig> | undefined {
+function parseRoles(raw: unknown, field: string, problems: string[]): Record<string, RoleConfig> | undefined {
 	if (raw === undefined) return undefined;
 	if (!isRecord(raw)) {
 		problems.push(`${field} 要写成一个对象，这一项被忽略`);
@@ -242,7 +238,8 @@ export function describeConfig(
 	}
 
 	const flow = resolveFlow(options.cwd, loaded.config, dirName);
-	const flowLoaded = Boolean(readOptionalFile(flow.path));	items.push({
+	const flowLoaded = Boolean(readOptionalFile(flow.path));
+	items.push({
 		key: "flow",
 		label: "流程文档",
 		value: path.relative(options.cwd, flow.path) || flow.path,
@@ -342,7 +339,9 @@ export function resolveRoleCard(
 		return {
 			origin: {
 				kind: "absent",
-				detail: configured ? `配置指定 ${configured}，文件不在` : `${path.join(dirName, "characters")} 下没有 ${role}.md`,
+				detail: configured
+					? `配置指定 ${configured}，文件不在`
+					: `${path.join(dirName, "characters")} 下没有 ${role}.md`,
 			},
 		};
 	}
@@ -350,7 +349,10 @@ export function resolveRoleCard(
 		path: resolved,
 		origin: configured
 			? { kind: "declared", detail: `roles.${role}.card` }
-			: { kind: "fallback", detail: `roles 里没声明 ${role}，按 ${path.join(dirName, "characters", `${role}.md`)} 命中` },
+			: {
+					kind: "fallback",
+					detail: `roles 里没声明 ${role}，按 ${path.join(dirName, "characters", `${role}.md`)} 命中`,
+				},
 	};
 }
 

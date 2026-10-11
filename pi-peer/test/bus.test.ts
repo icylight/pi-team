@@ -1,11 +1,11 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { test } from "node:test";
 
 import extension from "../index.ts";
-import { PeerStore, cwdKey } from "../store.ts";
+import { cwdKey, PeerStore } from "../store.ts";
 
 /**
  * 跨包协议：别的扩展（pi-work-orders）通过事件总线叫人、问身份。
@@ -76,15 +76,21 @@ test("peer 渲染器提取文本块并跳过图片", () => {
 	try {
 		const render = peer.renderers.get("peer");
 		const component = render(
-			{ content: [
-				{ type: "text", text: "[peer] from dev\n\n第一段" },
-				{ type: "image", data: "synthetic", mimeType: "image/png" },
-				{ type: "text", text: "第二段" },
-			], details: { fromName: "dev", fromModel: "test/model" } },
+			{
+				content: [
+					{ type: "text", text: "[peer] from dev\n\n第一段" },
+					{ type: "image", data: "synthetic", mimeType: "image/png" },
+					{ type: "text", text: "第二段" },
+				],
+				details: { fromName: "dev", fromModel: "test/model" },
+			},
 			{ outputPad: 0 },
 			{ fg: (_color: string, text: string) => text },
 		);
-		assert.deepEqual(component.render(80).map((line: string) => line.trimEnd()), ["⇄ dev · test/model", "第一段", "第二段"]);
+		assert.deepEqual(
+			component.render(80).map((line: string) => line.trimEnd()),
+			["⇄ dev · test/model", "第一段", "第二段"],
+		);
 	} finally {
 		peer.restore();
 	}
@@ -101,9 +107,14 @@ for (const [name, content, expected] of [
 		const peer = mountPeer(cwd, peerRoot);
 		try {
 			const component = peer.renderers.get("peer")(
-				{ content }, { outputPad: 0 }, { fg: (_color: string, text: string) => text },
+				{ content },
+				{ outputPad: 0 },
+				{ fg: (_color: string, text: string) => text },
 			);
-			assert.deepEqual(component.render(80).map((line: string) => line.trimEnd()), expected);
+			assert.deepEqual(
+				component.render(80).map((line: string) => line.trimEnd()),
+				expected,
+			);
 		} finally {
 			peer.restore();
 		}
@@ -111,13 +122,7 @@ for (const [name, content, expected] of [
 }
 
 /** 造一个在线的角色会话成员，pid 用当前进程（必活） */
-function liveMember(
-	peerRoot: string,
-	cwd: string,
-	key: string,
-	name: string,
-	extra: Record<string, unknown> = {},
-) {
+function liveMember(peerRoot: string, cwd: string, key: string, name: string, extra: Record<string, unknown> = {}) {
 	const store = new PeerStore(peerRoot, cwd);
 	fs.mkdirSync(store.membersDir, { recursive: true });
 	fs.writeFileSync(
@@ -170,7 +175,7 @@ test("peer:deliver 投给第一个在线的候选，并写进对方收件箱", a
 	try {
 		const results: Record<string, unknown>[] = [];
 		peer.channels.set("peer:deliver:result", [(data) => results.push(data as Record<string, unknown>)]);
-		await (peer.handlers.get("session_start") as ((e: unknown, c: unknown) => Promise<void>))?.({}, ctxFor(cwd));
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
 		liveMember(peerRoot, cwd, "9000-aaaa", "dev");
 
 		for (const fn of (peer.channels.get("peer:deliver") ?? []) as ((d: unknown) => void)[]) {
@@ -194,7 +199,7 @@ test("候选都不在线：回失败，且不写进任何收件箱", async () =>
 	try {
 		const results: Record<string, unknown>[] = [];
 		peer.channels.set("peer:deliver:result", [(data) => results.push(data as Record<string, unknown>)]);
-		await (peer.handlers.get("session_start") as ((e: unknown, c: unknown) => Promise<void>))?.({}, ctxFor(cwd));
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
 
 		for (const fn of (peer.channels.get("peer:deliver") ?? []) as ((d: unknown) => void)[]) {
 			fn({ id: "req-2", targets: ["dev", "qa"], text: "没人接" });
@@ -212,7 +217,7 @@ test("peer:whoami 回当前会话的名字", async () => {
 	const { cwd, peerRoot } = tmpPair();
 	const peer = mountPeer(cwd, peerRoot);
 	try {
-		await (peer.handlers.get("session_start") as ((e: unknown, c: unknown) => Promise<void>))?.({}, ctxFor(cwd));
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
 		const replies: Record<string, unknown>[] = [];
 		peer.channels.set("peer:whoami:result", [(data) => replies.push(data as Record<string, unknown>)]);
 
@@ -233,7 +238,7 @@ test("requireIdle：对方在忙时不投，回忙的原因", async () => {
 	try {
 		const results: Record<string, unknown>[] = [];
 		peer.channels.set("peer:deliver:result", [(data) => results.push(data as Record<string, unknown>)]);
-		await (peer.handlers.get("session_start") as ((e: unknown, c: unknown) => Promise<void>))?.({}, ctxFor(cwd));
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
 		// 在线的 dev，但正在跑一轮
 		liveMember(peerRoot, cwd, "9100-bbbb", "dev", { busy: true, busySince: Date.now() });
 
@@ -255,7 +260,7 @@ test("requireIdle：空闲的照常投", async () => {
 	try {
 		const results: Record<string, unknown>[] = [];
 		peer.channels.set("peer:deliver:result", [(data) => results.push(data as Record<string, unknown>)]);
-		await (peer.handlers.get("session_start") as ((e: unknown, c: unknown) => Promise<void>))?.({}, ctxFor(cwd));
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
 		liveMember(peerRoot, cwd, "9200-cccc", "dev", { busy: false });
 
 		for (const fn of (peer.channels.get("peer:deliver") ?? []) as ((d: unknown) => void)[]) {
@@ -269,12 +274,12 @@ test("requireIdle：空闲的照常投", async () => {
 });
 
 test("不传 requireIdle 时照常投给在忙的（手动消息不受限）", async () => {
-	const { cwd, peerRoot, store } = tmpPair();
+	const { cwd, peerRoot } = tmpPair();
 	const peer = mountPeer(cwd, peerRoot);
 	try {
 		const results: Record<string, unknown>[] = [];
 		peer.channels.set("peer:deliver:result", [(data) => results.push(data as Record<string, unknown>)]);
-		await (peer.handlers.get("session_start") as ((e: unknown, c: unknown) => Promise<void>))?.({}, ctxFor(cwd));
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
 		liveMember(peerRoot, cwd, "9300-dddd", "dev", { busy: true, busySince: Date.now() });
 
 		for (const fn of (peer.channels.get("peer:deliver") ?? []) as ((d: unknown) => void)[]) {
@@ -310,7 +315,7 @@ test("peer_list 列得出同项目与跨项目的会话，忙闲看着对", asyn
 	fs.mkdirSync(otherCwd, { recursive: true });
 	const peer = mountPeer(cwd, peerRoot);
 	try {
-		await (peer.handlers.get("session_start") as ((e: unknown, c: unknown) => Promise<void>))?.({}, ctxFor(cwd));
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
 		liveMember(peerRoot, cwd, "9400-eeee", "dev", { busy: true, busySince: Date.now() });
 		liveMember(peerRoot, otherCwd, "9500-ffff", "qa", { busy: false });
 
@@ -344,7 +349,7 @@ test("配置缺失但角色卡按兜底命中：启动就说出来，并指向 /
 	process.env.PI_PEER_ROLE = "owner";
 	const peer = mountPeer(cwd, peerRoot);
 	try {
-		await (peer.handlers.get("session_start") as ((e: unknown, c: unknown) => Promise<void>))?.(
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.(
 			{},
 			ctxFor(cwd, peer.notes),
 		);
@@ -363,7 +368,7 @@ test("没有配置文件、也没有角色：不吵（项目标签兜底是常�
 	const { cwd, peerRoot } = tmpPair();
 	const peer = mountPeer(cwd, peerRoot);
 	try {
-		await (peer.handlers.get("session_start") as ((e: unknown, c: unknown) => Promise<void>))?.(
+		await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.(
 			{},
 			ctxFor(cwd, peer.notes),
 		);

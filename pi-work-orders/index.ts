@@ -15,8 +15,8 @@
  * 这里只锚定「角色」，不认状态名。
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { buildDigest, buildWakeText, renderStale } from "./core/digest.ts";
 import { describeError, formatHistory, formatList, formatOrder, formatWaiting } from "./core/format.ts";

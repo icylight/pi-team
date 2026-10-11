@@ -144,10 +144,7 @@ describe("跨项目发现与寻址", () => {
 		member(b, "2001-bbbb", "beta", { project: "proj-b" });
 
 		const all = a.listAllMembers();
-		assert.deepEqual(
-			all.map((s) => `${s.project}/${s.member.name}`).sort(),
-			["proj-a/alpha", "proj-b/beta"],
-		);
+		assert.deepEqual(all.map((s) => `${s.project}/${s.member.name}`).sort(), ["proj-a/alpha", "proj-b/beta"]);
 		assert.equal(all.find((s) => s.member.name === "beta")?.bucket, b.dir);
 	});
 
@@ -257,11 +254,7 @@ describe("注册与发现", () => {
 		const store = freshStore();
 		member(store, "1002-cccc", "stale", { lastSeen: Date.now() - STALE_MS - 1000 });
 		assert.equal(store.listMembers().length, 0);
-		assert.equal(
-			store.listMembers({ includeStale: true }).length,
-			0,
-			"清理后连 stale 也不该再出现",
-		);
+		assert.equal(store.listMembers({ includeStale: true }).length, 0, "清理后连 stale 也不该再出现");
 	});
 
 	it("unregister 后立即消失", () => {

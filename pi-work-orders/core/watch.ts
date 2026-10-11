@@ -9,9 +9,9 @@
  *   { "enabled": true, "workOrders": { "followRole": "owner" } }
  */
 
-import type { DatabaseSync } from "node:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { formatWaitingLine } from "./digest.ts";
 import { groupByActor, staleWaiting } from "./store.ts";
 import { isHumanActor, STALE_MINUTES, type Waiting } from "./types.ts";
@@ -153,6 +153,8 @@ function renderNote(due: Waiting[], me: string, config: WatchConfig, now: number
 		for (const item of items.slice(0, MAX_LINES)) lines.push(`  ${formatWaitingLine(item, now)}`);
 		if (items.length > MAX_LINES) lines.push(`  ……另有 ${items.length - MAX_LINES} 条，用 orders_list 看全`);
 	}
-	lines.push("下一步：orders_show(id=…) 读正文；接不下的改派给别的角色（orders_update 的 nextActors），收口要带终止依据。");
+	lines.push(
+		"下一步：orders_show(id=…) 读正文；接不下的改派给别的角色（orders_update 的 nextActors），收口要带终止依据。",
+	);
 	return lines.join("\n");
 }
