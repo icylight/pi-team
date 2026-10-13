@@ -1,0 +1,7 @@
+# Next 构建产物与依赖：不提交（git 源安装的检出自己 build）
+/node_modules
+/.next/
+/out/
+next-env.d.ts
+*.tsbuildinfo
+.vercel

@@ -2,7 +2,13 @@
 	"$schema": "https://biomejs.dev/schemas/2.3.5/schema.json",
 	"root": true,
 	"files": {
-		"includes": ["pi-peer/**/*.ts", "pi-work-orders/**/*.ts", "pi-work-orders/**/*.mjs", "!!**/node_modules"]
+		"includes": [
+			"pi-peer/**/*.ts",
+			"pi-work-orders/**/*.ts",
+			"pi-work-orders/**/*.mjs",
+			"!!**/node_modules",
+			"!!pi-work-orders/web"
+		]
 	},
 	"linter": {
 		"enabled": true,

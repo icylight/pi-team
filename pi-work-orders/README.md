@@ -31,7 +31,14 @@
 - 服务是**独立进程**（默认端口 8787，`PI_WORK_ORDERS_WEB_PORT` 可改）：pi 会话开开关关它还在，多个会话共用同一个
 - 只绑 `127.0.0.1`，库一律**只读**打开。schema 落后的库读不了，页面上会提示去那个项目里跑一次 `/orders` 升级
 - 扫描根默认取当前目录与 `$CODE_ROOT`（缺省 `~/code`）下的一级子目录；端口已占且不是看板时，换 `--port`
-- 直接跑：`node pi-work-orders/web/serve.ts [--port n] [--root <dir>] [--open] [--stop]`
+
+看板是 Next.js（App Router + shadcn/ui）应用，源码在 `web/`。产物不入库，**先构建再起**：
+
+```bash
+cd pi-work-orders/web && npm install && npm run build   # 一次即可，改了 UI 再 build
+```
+
+开发时用 `npm run dev`。`/orders web` 起的是构建产物（`next start -H 127.0.0.1`），构建目录缺失时它会提示先 build。
 
 ## 下一步找谁：有序候选
 

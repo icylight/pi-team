@@ -8,7 +8,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { DEFAULT_DB_DIR, DEFAULT_DB_NAME } from "../core/schema.ts";
+import { DEFAULT_DB_DIR, DEFAULT_DB_NAME } from "../../core/schema.ts";
 
 export interface LedgerRef {
 	/** URL 段用的短名；不同根下同名目录靠后缀区分 */

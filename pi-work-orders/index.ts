@@ -136,10 +136,22 @@ async function handleWeb(sub: string, ctx: ExtensionContext): Promise<void> {
 	}
 
 	try {
-		const serve = fileURLToPath(new URL("./web/serve.ts", import.meta.url));
+		// Next 的服务：用 next 的 bin 直接起（不依赖 PATH 里的 next），绑 127.0.0.1 由 -H 指定。
+		// 构建产物在 web/.next，需开发机先 npm run build；git 源安装的检出同样要自己 build 一次。
+		const webRoot = fileURLToPath(new URL("./web", import.meta.url));
+		const nextBin = path.join(webRoot, "node_modules", "next", "dist", "bin", "next");
+		if (!fs.existsSync(nextBin)) {
+			ctx.ui.notify(`看板的 Next 依赖没装。先构建：cd ${webRoot} && npm install && npm run build`, "warning");
+			return;
+		}
 		const log = fs.openSync(WEB_LOG, "a");
-		spawn(process.execPath, [serve, "--port", String(port), "--open"], {
-			cwd: ctx.cwd, // 默认扫描根取这里，看板里就有当前项目
+		spawn(process.execPath, [nextBin, "start", "-H", "127.0.0.1", "-p", String(port)], {
+			cwd: webRoot,
+			env: {
+				...process.env,
+				// 会话所在目录当扫描根，看板里就有当前项目（原 serve --root 的等价物）
+				PI_WORK_ORDERS_WEB_ROOTS: ctx.cwd,
+			},
 			detached: true,
 			stdio: ["ignore", log, log],
 		}).unref();
@@ -150,9 +162,10 @@ async function handleWeb(sub: string, ctx: ExtensionContext): Promise<void> {
 	}
 
 	// 等它就绪：起来了才敢说「已打开」，没起来就把日志尾巴给用户
-	for (let i = 0; i < 20; i++) {
-		await sleep(150);
+	for (let i = 0; i < 40; i++) {
+		await sleep(250);
 		if (await webAlive(port)) {
+			openBrowser(url);
 			ctx.ui.notify(`看板起在 ${url}，浏览器随后打开。停：/orders web stop`, "info");
 			return;
 		}
