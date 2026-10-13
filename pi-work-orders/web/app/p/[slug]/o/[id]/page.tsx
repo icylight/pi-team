@@ -61,7 +61,7 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 	return (
 		<div className="mx-auto max-w-3xl px-6 py-10">
 			<p className="mb-3 text-sm">
-				<Link className="text-muted-foreground hover:text-foreground" href={`/#${slug}`}>
+				<Link className="text-muted-foreground hover:text-foreground" href={`/p/${slug}`}>
 					← {data.project}
 				</Link>
 			</p>

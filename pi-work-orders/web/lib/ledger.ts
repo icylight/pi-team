@@ -10,7 +10,16 @@ import * as path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { eventsOf, openLedger, statesOf } from "../../core/schema.ts";
 import { getOrder, listOrders, requirementOf, staleWaiting, waitingOrders } from "../../core/store.ts";
-import type { ListedOrder, OrderEvent, OrderView, Requirement, StateRole, Waiting } from "../../core/types.ts";
+import {
+	TERMINAL_ROLES,
+	type ListedOrder,
+	type Order,
+	type OrderEvent,
+	type OrderView,
+	type Requirement,
+	type StateRole,
+	type Waiting,
+} from "../../core/types.ts";
 import { STALE_MINUTES } from "../../core/types.ts";
 import { discoverLedgers, type LedgerRef } from "./scan.ts";
 
@@ -106,4 +115,38 @@ function readableError(text: string, dir: string): string {
 
 function readError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** 未收口的单：状态不在终态角色（done/cancelled）里的 */
+export function openOrders(l: LedgerSnapshot): ListedOrder[] {
+	const terminal = new Set<string>();
+	for (const role of TERMINAL_ROLES) {
+		const name = l.states?.[role];
+		if (name) terminal.add(name);
+	}
+	return (l.orders ?? []).filter((o) => !terminal.has(o.state));
+}
+
+/** 跨项目「需关注」：等人动手的单（action/decision），按等待最久排前 */
+export interface AttentionItem {
+	slug: string;
+	project: string;
+	order: Order;
+	waiting: Waiting;
+	stale: boolean;
+}
+
+export function attention(snapshots: readonly LedgerSnapshot[], limit = 10): AttentionItem[] {
+	const items: AttentionItem[] = [];
+	for (const l of snapshots) {
+		if (!l.ok) continue;
+		const open = new Set(openOrders(l).map((o) => o.id));
+		const staleIds = new Set((l.stale ?? []).map((w) => w.order.id));
+		for (const w of l.waiting ?? []) {
+			if (w.kind === "dependency" || !open.has(w.order.id)) continue;
+			items.push({ slug: l.slug, project: l.name, order: w.order, waiting: w, stale: staleIds.has(w.order.id) });
+		}
+	}
+	items.sort((a, b) => Date.parse(a.waiting.since) - Date.parse(b.waiting.since));
+	return items.slice(0, limit);
 }

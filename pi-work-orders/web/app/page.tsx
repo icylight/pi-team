@@ -1,25 +1,22 @@
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { OrdersTable } from "@/components/orders-table";
-import { ledgers, snapshot, type LedgerSnapshot } from "@/lib/ledger";
-import { nowMs } from "@/lib/time";
-import type { StateRole } from "../../core/types";
+import Link from "next/link";
+import { attention, ledgers, openOrders, snapshot, type AttentionItem } from "@/lib/ledger";
+import { formatAgo, minutesSince, nowMs } from "@/lib/time";
 
 // 每次请求都读最新库，不做静态化
 export const dynamic = "force-dynamic";
 
-
-function openOrders(l: LedgerSnapshot) {
-	const states = l.states;
-	if (!states) return [];
-	return (l.orders ?? []).filter((o) => o.state !== states.done && o.state !== states.cancelled);
-}
-
+/**
+ * 总览（决策层）：全局统计 + 跨项目「需关注」队列。
+ * 项目索引用侧边栏；单条工单的明细在 /p/<项目> 的状态看板里。
+ */
 export default function IndexPage() {
 	const refs = ledgers();
 	const snapshots = refs.map(snapshot);
-	const total = snapshots.reduce((n, l) => n + (l.orders?.length ?? 0), 0);
-	const open = snapshots.reduce((n, l) => n + openOrders(l).length, 0);
-	const stale = snapshots.reduce((n, l) => n + (l.stale?.length ?? 0), 0);
+	const ok = snapshots.filter((l) => l.ok);
+	const total = ok.reduce((n, l) => n + (l.orders?.length ?? 0), 0);
+	const open = ok.reduce((n, l) => n + openOrders(l).length, 0);
+	const stale = ok.reduce((n, l) => n + (l.stale?.length ?? 0), 0);
+	const items = attention(snapshots);
 	const now = nowMs();
 
 	return (
@@ -37,79 +34,47 @@ export default function IndexPage() {
 					没找到工单库。用 <code className="rounded bg-muted px-1 py-0.5 font-mono text-[13px]">--root</code>{" "}
 					指到项目所在的目录。
 				</p>
+			) : items.length > 0 ? (
+				<AttentionList items={items} now={now} />
 			) : (
-				<div className="flex flex-col gap-10">
-					{snapshots.map((l) => (
-						<ProjectSection key={l.slug} ledger={l} now={now} />
-					))}
-				</div>
+				<p className="text-sm text-muted-foreground">没有在等人动手的单。</p>
 			)}
 		</div>
 	);
 }
 
-function ProjectSection({ ledger, now }: { ledger: LedgerSnapshot; now: number }) {
-	if (!ledger.ok) {
-		return (
-			<section id={ledger.slug}>
-				<h2 className="text-base font-semibold">{ledger.name}</h2>
-				<p className="mt-0.5 font-mono text-xs text-muted-foreground">{ledger.dir}</p>
-				<p className="mt-2 text-sm text-destructive">读不出来：{ledger.error ?? "未知原因"}</p>
-			</section>
-		);
-	}
-
-	const orders = ledger.orders ?? [];
-	const states = (ledger.states ?? {}) as Record<StateRole, string>;
-	const open = openOrders(ledger);
-	const closed = orders.filter((o) => !open.includes(o));
-	const req = ledger.requirement;
-
+function AttentionList({ items, now }: { items: AttentionItem[]; now: number }) {
 	return (
-		<section id={ledger.slug}>
-			<div className="flex items-baseline justify-between gap-4">
-				<h2 className="text-base font-semibold">{ledger.name}</h2>
-				<span className="text-sm text-muted-foreground">
-					未收口 {open.length} / 共 {orders.length}
-				</span>
-			</div>
-			<p className="mt-0.5 font-mono text-xs text-muted-foreground">{ledger.dir}</p>
-			{req && (req.goal || req.baseline) ? (
-				<p className="mt-1.5 text-xs text-muted-foreground">
-					{[req.goal, req.baseline ? `基线 ${req.baseline}` : ""].filter(Boolean).join(" · ")}
-				</p>
-			) : null}
-
-			<div className="mt-3">
-				{open.length ? (
-					<OrdersTable
-						slug={ledger.slug}
-						orders={open}
-						states={states}
-						waiting={ledger.waiting ?? []}
-						now={now}
-					/>
-				) : (
-					<p className="text-sm text-muted-foreground">没有在办的单</p>
-				)}
-			</div>
-
-			{closed.length ? (
-				<Collapsible className="mt-4">
-					<CollapsibleTrigger className="cursor-pointer text-sm text-muted-foreground hover:text-foreground">
-						已收口 / 已取消 {closed.length}
-					</CollapsibleTrigger>
-					<CollapsibleContent className="mt-2">
-						<OrdersTable
-							slug={ledger.slug}
-							orders={closed}
-							states={states}
-							waiting={ledger.waiting ?? []}
-							now={now}
-						/>
-					</CollapsibleContent>
-				</Collapsible>
-			) : null}
+		<section>
+			<h2 className="mb-2 text-sm font-medium text-muted-foreground">需关注（等人动手，等待最久在前）</h2>
+			<ul className="divide-y rounded-lg border bg-card">
+				{items.map((it) => (
+					<li key={`${it.slug}:${it.order.id}`} className="flex items-baseline gap-3 px-3 py-2 text-sm">
+						<Link
+							className="font-mono text-xs text-primary hover:underline"
+							href={`/p/${it.slug}/o/${encodeURIComponent(it.order.id)}`}
+						>
+							{it.order.id}
+						</Link>
+						<span className="w-32 shrink-0 truncate text-muted-foreground">{it.project}</span>
+						<Link
+							className="min-w-0 flex-1 truncate hover:underline"
+							href={`/p/${it.slug}/o/${encodeURIComponent(it.order.id)}`}
+						>
+							{it.order.title}
+						</Link>
+						<span className="shrink-0 text-xs text-muted-foreground">
+							等 {it.order.nextActors[0] ?? "未指定"}
+						</span>
+						<span
+							className={`shrink-0 font-mono text-xs ${it.stale ? "text-destructive" : "text-amber-600 dark:text-amber-400"}`}
+						>
+							{it.stale ? "停滞 " : ""}
+							{formatAgo(minutesSince(it.waiting.since, now))}
+						</span>
+					</li>
+				))}
+			</ul>
 		</section>
 	);
 }

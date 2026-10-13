@@ -24,3 +24,5 @@ pi-peer/README.md	67 个用例覆盖角色	n/a	跑 npm test 才有的用例数�
 pi-work-orders/test/watch.test.mjs	三个字段	n/a	该用例的输入写了三个非法字段，说的是这一处的输入规模
 README.md	一个包	n/a	「只需其中一个包时」指任一个包，不定指
 README.md	一个扩展	n/a	「同一个扩展只保留一种安装方式」指任一个扩展，不定指
+pi-peer/skills/peer-config-edit/SKILL.md	两个必填字段	n/a	指 frontmatter 的 name/description 两个具名字段，列举而非集合计数
+pi-work-orders/web/lib/scan.ts	两种形态	n/a	注释说明扫描对象来自两类来源（代码根下各仓库与当前项目），概念划分无代码真相源

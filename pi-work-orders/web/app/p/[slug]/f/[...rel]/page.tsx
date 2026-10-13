@@ -23,8 +23,8 @@ export default async function FilePage({ params }: PageProps<"/p/[slug]/f/[...re
 				<h1 className="text-lg font-semibold">拒绝访问</h1>
 				<p className="mt-2 text-sm text-destructive">只读项目内的 markdown：{relPath}</p>
 				<p className="mt-3 text-sm">
-					<Link className="text-primary hover:underline" href={`/#${slug}`}>
-						← 回到总览
+					<Link className="text-primary hover:underline" href={`/p/${slug}`}>
+						← 回到项目
 					</Link>
 				</p>
 			</div>
@@ -41,7 +41,7 @@ export default async function FilePage({ params }: PageProps<"/p/[slug]/f/[...re
 	return (
 		<div className="mx-auto max-w-3xl px-6 py-10">
 			<p className="mb-3 text-sm">
-				<Link className="text-muted-foreground hover:text-foreground" href={`/#${slug}`}>
+				<Link className="text-muted-foreground hover:text-foreground" href={`/p/${slug}`}>
 					← {ref.name}
 				</Link>
 			</p>
