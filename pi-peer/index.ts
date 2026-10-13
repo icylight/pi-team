@@ -16,9 +16,10 @@
  *   /peer-name <名字>    给普通会话起名（持久化到 session）
  *   /peer-send <目标> <正文>   目标可写「项目/名字」发给其他项目
  *   /peer-new [--role 角色]  当前终端新建会话并领取角色；同角色实例自动命名为 dev、dev-2……
+ *   /peer-role [角色|none]  查看/中途切换本会话角色（换角色卡、应用角色默认模型）；不带参弹列表选，none 取消
  *
  * 角色会话：领取角色时把角色卡与项目流程注入 system prompt，消息按具体实例名寻址。
- * 角色不支持运行中切换；重启会话会沿用会话里记录的角色。
+ * 重启会话会沿用会话里记录的角色（含中途切换与取消）。
  *
  * 工具：peer_list / peer_send / peer_inbox
  *
@@ -75,6 +76,8 @@ const ROLE_ENTRY = "peer-role";
 const ROLE_DEFAULTS_ENTRY = "peer-role-defaults";
 /** 角色选择列表里的自定义项；角色名须以字母开头，所以它与真角色不会重名 */
 const CUSTOM_ROLE_ITEM = "＋ 自定义角色名…";
+/** /peer-role 选择列表里的取消项，同样不会与真角色重名 */
+const CLEAR_ROLE_ITEM = "－ 取消角色";
 
 // ── 会话内状态 ──────────────────────────────────────
 
@@ -103,6 +106,37 @@ export default function (pi: ExtensionAPI) {
 	/** 生效配置的报告：启动提示与 /peer-config 共用，保证「报的」就是「跑的」 */
 	function configReport(cwd: string, role?: string) {
 		return describeConfig(loaded, { cwd, role, dirName: CONFIG_DIR_NAME });
+	}
+
+	/** 应用角色的默认模型与思考等级；失败保留会话设置并提示，返回是否全部生效与实际模型 */
+	async function applyRoleDefaults(
+		role: string,
+		ctx: ExtensionContext,
+	): Promise<{ applied: boolean; model?: ReturnType<ExtensionContext["modelRegistry"]["find"]> }> {
+		const defaults = {
+			...loaded.config.roles?.[role],
+			...loaded.config.group?.roles?.[role],
+		};
+		let applied = true;
+		let model: ReturnType<ExtensionContext["modelRegistry"]["find"]>;
+		if (defaults.model) {
+			const slash = defaults.model.indexOf("/");
+			try {
+				model = ctx.modelRegistry.find(defaults.model.slice(0, slash), defaults.model.slice(slash + 1));
+				if (!model || !(await pi.setModel(model))) {
+					throw new Error("模型未注册或缺少认证");
+				}
+			} catch (error) {
+				applied = false;
+				if (ctx.hasUI)
+					ctx.ui.notify(
+						`pi-peer: 角色 ${role} 默认模型 ${defaults.model} 未应用：${(error as Error).message}，保留会话设置`,
+						"warning",
+					);
+			}
+		}
+		if (applied && defaults.thinkingLevel !== undefined) pi.setThinkingLevel(defaults.thinkingLevel);
+		return { applied, model };
 	}
 
 	// ── 生命周期 ────────────────────────────────────
@@ -135,7 +169,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		const effectiveRole = role && roleCardPath ? role : undefined;
 		let activeModel = ctx.model;
-		// AI(TAG): [角色默认设置] 默认值只初始化一次，恢复会话保留用户后续选择。
+		// AI(TAG): [角色默认设置] 默认值每个角色只初始化一次，恢复会话保留用户后续选择。
 		if (
 			effectiveRole &&
 			!ctx.sessionManager
@@ -147,30 +181,9 @@ export default function (pi: ExtensionAPI) {
 						(entry.data as { role?: string } | undefined)?.role === effectiveRole,
 				)
 		) {
-			const defaults = {
-				...loaded.config.roles?.[effectiveRole],
-				...loaded.config.group?.roles?.[effectiveRole],
-			};
-			let applied = true;
-			if (defaults.model) {
-				const slash = defaults.model.indexOf("/");
-				try {
-					const model = ctx.modelRegistry.find(defaults.model.slice(0, slash), defaults.model.slice(slash + 1));
-					if (!model || !(await pi.setModel(model))) {
-						throw new Error("模型未注册或缺少认证");
-					}
-					activeModel = model;
-				} catch (error) {
-					applied = false;
-					if (ctx.hasUI)
-						ctx.ui.notify(
-							`pi-peer: 角色 ${effectiveRole} 默认模型 ${defaults.model} 未应用：${(error as Error).message}，保留会话设置`,
-							"warning",
-						);
-				}
-			}
-			if (applied) {
-				if (defaults.thinkingLevel !== undefined) pi.setThinkingLevel(defaults.thinkingLevel);
+			const res = await applyRoleDefaults(effectiveRole, ctx);
+			if (res.applied) {
+				activeModel = res.model ?? activeModel;
 				pi.appendEntry(ROLE_DEFAULTS_ENTRY, { role: effectiveRole });
 			}
 		}
@@ -416,7 +429,9 @@ export default function (pi: ExtensionAPI) {
 				...foreign.map((s) => render(s.member, s.live, `${s.project}/${s.member.name}`)),
 			];
 			if (own.length === 0 && foreign.length === 0) {
-				lines.push("（同目录暂无其他会话：新终端 cd 到同目录再开一个 pi，或用 /peer-new 新建，可带角色）");
+				lines.push(
+					"（同目录暂无其他会话：新终端 cd 到同目录再开一个 pi，或用 /peer-new 新建，可带角色；当前会话用 /peer-role 领角色）",
+				);
 			}
 			if (!scopeAll) {
 				const others = store.listAllMembers().filter((s) => s.bucket !== store!.dir);
@@ -551,7 +566,9 @@ export default function (pi: ExtensionAPI) {
 				...(scopeAll ? foreignAll.map((s) => row(s.member, `${s.project}/${s.member.name}`)) : []),
 			];
 			if (own.length === 0 && foreignAll.length === 0) {
-				lines.push("（同目录暂无其他会话：新终端 cd 到同目录再开一个 pi，或用 /peer-new 新建，可带角色）");
+				lines.push(
+					"（同目录暂无其他会话：新终端 cd 到同目录再开一个 pi，或用 /peer-new 新建，可带角色；当前会话用 /peer-role 领角色）",
+				);
 			}
 			if (!scopeAll && foreignAll.length > 0) {
 				lines.push(`（另有 ${foreignAll.length} 个其他项目的在线会话，/peers all 看）`);
@@ -570,15 +587,101 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("peer-role", {
-		description: "查看本会话当前角色（角色只能在启动时指定）",
-		handler: async (_args, ctx) => {
-			if (!self) {
+		description: "查看或中途切换本会话角色（不带参弹列表选；用法：/peer-role [角色|none]）",
+		handler: async (args, ctx) => {
+			if (!store || !self) {
 				ctx.ui.notify("pi-peer 未启用", "warning");
 				return;
 			}
-			ctx.ui.notify(self.role ? `当前角色：${self.role}，实例名：${self.name}` : "当前会话未加载角色", "info");
+			const me = self;
+			const arg = args.trim();
+			if (!arg) {
+				ctx.ui.notify(self.role ? `当前角色：${self.role}，实例名：${self.name}` : "当前会话未加载角色", "info");
+				const names = listRoleNames(ctx.cwd, loaded.config);
+				if (names.length === 0) return;
+				if (!ctx.hasUI) {
+					ctx.ui.notify(`可用角色：${names.join("、")}`, "info");
+					return;
+				}
+				const labelOf = (n: string) => (n === me.role ? `${n}（当前）` : n);
+				const picked = await ctx.ui.select("切换本会话角色？", [...names.map(labelOf), CLEAR_ROLE_ITEM]);
+				if (!picked) return;
+				if (picked === CLEAR_ROLE_ITEM) {
+					clearRole(ctx);
+					return;
+				}
+				const role = names.find((n) => labelOf(n) === picked);
+				if (role) await setRole(role, ctx);
+				return;
+			}
+			if (arg === "none") {
+				clearRole(ctx);
+				return;
+			}
+			await setRole(arg, ctx);
 		},
 	});
+
+	/** 中途领取角色：换角色卡、认领实例名槽位、应用角色默认设置，并记入会话供重启恢复 */
+	async function setRole(role: string, ctx: ExtensionContext): Promise<void> {
+		if (!store || !self) return;
+		if (!isValidRoleName(role)) {
+			ctx.ui.notify("角色名只能包含字母、数字、下划线和连字符，且必须以字母开头", "warning");
+			return;
+		}
+		if (self.role === role) {
+			ctx.ui.notify(`已是角色 ${role}（实例名：${self.name}）`, "info");
+			return;
+		}
+		const cardPath = resolveRoleCard(ctx.cwd, loaded.config, role, CONFIG_DIR_NAME).path;
+		if (!cardPath) {
+			ctx.ui.notify(
+				`找不到角色 ${role} 的角色卡：在 ${CONFIG_DIR_NAME}/characters/<角色>.md 放一份，或在 ${CONFIG_FILE} 的 roles 里声明`,
+				"warning",
+			);
+			return;
+		}
+		if (self.role && self.roleSlot) store.releaseRoleName(self.role, self.roleSlot, self.key);
+		let slot: string;
+		try {
+			slot = store.claimRoleName(role, self.key, process.pid);
+		} catch (error) {
+			ctx.ui.notify((error as Error).message, "warning");
+			return;
+		}
+		const res = await applyRoleDefaults(role, ctx);
+		if (res.applied) pi.appendEntry(ROLE_DEFAULTS_ENTRY, { role });
+		roleCard = readOptionalFile(cardPath);
+		self.role = role;
+		self.roleSlot = slot;
+		self.name = slot;
+		if (res.model) self.model = `${res.model.provider}/${res.model.id}`;
+		pi.appendEntry(ROLE_ENTRY, { role, name: slot });
+		store.register(self);
+		refreshStatus();
+		ctx.ui.notify(`已切换角色：${role}，实例名：${slot}`, "info");
+	}
+
+	/** 取消角色：释放槽位、摘掉角色卡，名字退回手动名或会话名 */
+	function clearRole(ctx: ExtensionContext): void {
+		if (!store || !self) return;
+		if (!self.role) {
+			ctx.ui.notify("当前会话未加载角色", "info");
+			return;
+		}
+		if (self.roleSlot) store.releaseRoleName(self.role, self.roleSlot, self.key);
+		roleCard = undefined;
+		const fallback =
+			restoreName(ctx) ?? pi.getSessionName() ?? `${path.basename(ctx.cwd) || "session"}-${process.pid}`;
+		self.role = undefined;
+		self.roleSlot = undefined;
+		self.name = fallback;
+		// role 记空串而不是删条目：restoreRole 取最后一条，空串表示「明确取消过」
+		pi.appendEntry(ROLE_ENTRY, { role: "", name: fallback });
+		store.register(self);
+		refreshStatus();
+		ctx.ui.notify(`已取消角色，名称回到 ${fallback}`, "info");
+	}
 
 	pi.registerCommand("peer-name", {
 		description: "设置本会话在 pi-peer 里的名字（用法：/peer-name reviewer）",
@@ -770,7 +873,8 @@ function restoreRole(ctx: ExtensionContext): { role: string; name?: string } | u
 	let role: { role: string; name?: string } | undefined;
 	for (const entry of ctx.sessionManager.getEntries()) {
 		const e = entry as { type?: string; customType?: string; data?: { role?: string; name?: string } };
-		if (e.type === "custom" && e.customType === ROLE_ENTRY && e.data?.role) {
+		// 空串是 /peer-role none 的取消标记：取最后一条字符串值，让取消覆盖之前的领取
+		if (e.type === "custom" && e.customType === ROLE_ENTRY && typeof e.data?.role === "string") {
 			role = { role: e.data.role, name: e.data.name };
 		}
 	}
