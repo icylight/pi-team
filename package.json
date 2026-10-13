@@ -30,7 +30,8 @@
       "./pi-work-orders/index.ts"
     ],
     "skills": [
-      "./pi-work-orders/skills"
+      "./pi-work-orders/skills",
+      "./pi-peer/skills"
     ]
   },
   "scripts": {

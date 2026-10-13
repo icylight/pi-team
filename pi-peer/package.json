@@ -15,11 +15,15 @@
     "index.ts",
     "store.ts",
     "config.ts",
+    "skills",
     "README.md"
   ],
   "pi": {
     "extensions": [
       "./index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {

@@ -15,7 +15,7 @@ pi 的多会话协作工具：用 pi-peer 沟通，用 pi-work-orders 记录任�
 pi install git:github.com/icylight/pi-team
 ```
 
-安装根包会同时加载两个扩展和工单操作 skill。现有会话执行 `/reload`，或重启 pi。
+安装根包会同时加载两个扩展，以及工单操作 skill 与 peer 配置 skill。现有会话执行 `/reload`，或重启 pi。
 
 开发检出可直接安装本地目录：
 
