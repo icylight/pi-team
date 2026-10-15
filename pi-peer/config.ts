@@ -26,10 +26,12 @@ export const CONFIG_FILE = "peer.json";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
 export interface RoleConfig {
 	card?: string;
 	model?: string;
-	thinkingLevel?: (typeof THINKING_LEVELS)[number];
+	thinkingLevel?: ThinkingLevel;
 	canAssignRoles?: boolean;
 	canStartSessions?: boolean;
 }

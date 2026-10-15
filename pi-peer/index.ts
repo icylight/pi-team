@@ -16,6 +16,7 @@
  *   /peer-name <名字>    给普通会话起名（持久化到 session）
  *   /peer-send <目标> <正文>   目标可写「项目/名字」发给其他项目
  *   /peer-new [--role 角色]  当前终端新建会话并领取角色；同角色实例自动命名为 dev、dev-2……
+ *   /peer-reload         当前终端新建会话，上下文清空，名字、角色、模型与思考等级沿用当前
  *   /peer-role [角色|none]  查看/中途切换本会话角色（换角色卡、应用角色默认模型）；不带参弹列表选，none 取消
  *
  * 角色会话：领取角色时把角色卡与项目流程注入 system prompt，消息按具体实例名寻址。
@@ -49,6 +50,8 @@ import {
 	renderConfigReport,
 	resolveFlow,
 	resolveRoleCard,
+	THINKING_LEVELS,
+	type ThinkingLevel,
 } from "./config.ts";
 import { hasPersistedHandoff } from "./handoff-persistence.ts";
 import { registerSessionControl, SESSION_TASK_ENTRY } from "./session-control.ts";
@@ -78,6 +81,11 @@ const DRAIN_DEBOUNCE_MS = 50;
 /** 会话条目类型：记录本会话领取的角色，重启后据此恢复 */
 const ROLE_ENTRY = "peer-role";
 const ROLE_DEFAULTS_ENTRY = "peer-role-defaults";
+/** 会话条目类型：创建方写在新会话里的初始模型与思考等级 */
+const INHERIT_ENTRY = "peer-inherit";
+
+/** 初始默认模型与思考等级：来自角色配置，或创建方写进新会话的继承项 */
+type RoleDefaults = { model?: string; thinkingLevel?: ThinkingLevel };
 /** 角色选择列表里的自定义项；角色名须以字母开头，所以它与真角色不会重名 */
 const CUSTOM_ROLE_ITEM = "＋ 自定义角色名…";
 /** /peer-role 选择列表里的取消项，同样不会与真角色重名 */
@@ -144,10 +152,12 @@ export default function (pi: ExtensionAPI) {
 			);
 		},
 		resolve: resolveTarget,
-		seed: (manager, member) => {
-			manager.appendCustomEntry(ROLE_ENTRY, { role: member.role ?? "", name: member.roleSlot ?? member.name });
-			manager.appendCustomEntry("peer-name", { name: member.name });
-		},
+		seed: (manager, member, defaults) =>
+			seedSessionEntries(manager, {
+				role: member.role ?? "",
+				name: member.roleSlot ?? member.name,
+				...defaults,
+			}),
 	});
 	handleSessionControl = sessions.handle;
 	function peerCommand(handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>) {
@@ -227,15 +237,26 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	/** 应用角色的默认模型与思考等级；失败保留会话设置并提示，返回是否全部生效与实际模型 */
-	async function applyRoleDefaults(
-		role: string,
-		ctx: ExtensionContext,
-	): Promise<{ applied: boolean; model?: ReturnType<ExtensionContext["modelRegistry"]["find"]> }> {
-		const defaults = {
-			...loaded.config.roles?.[role],
-			...loaded.config.group?.roles?.[role],
+	/** 角色配置声明的默认模型与思考等级；group.roles 逐字段覆盖 roles */
+	function roleDefaults(role?: string): RoleDefaults {
+		if (!role) return {};
+		return { ...loaded.config.roles?.[role], ...loaded.config.group?.roles?.[role] };
+	}
+
+	/** 当前会话的模型与思考等级：角色不变时由它当新会话的初始值 */
+	function currentDefaults(ctx: ExtensionContext): RoleDefaults {
+		return {
+			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+			thinkingLevel: ctx.thinkingLevel,
 		};
+	}
+
+	/** 应用默认模型与思考等级；失败保留会话设置并提示，返回是否全部生效与实际模型 */
+	async function applyDefaults(
+		defaults: RoleDefaults,
+		ctx: ExtensionContext,
+		what: string,
+	): Promise<{ applied: boolean; model?: ReturnType<ExtensionContext["modelRegistry"]["find"]> }> {
 		let applied = true;
 		let model: ReturnType<ExtensionContext["modelRegistry"]["find"]>;
 		if (defaults.model) {
@@ -249,7 +270,7 @@ export default function (pi: ExtensionAPI) {
 				applied = false;
 				if (ctx.hasUI)
 					ctx.ui.notify(
-						`pi-peer: 角色 ${role} 默认模型 ${defaults.model} 未应用：${(error as Error).message}，保留会话设置`,
+						`pi-peer: ${what} ${defaults.model} 未应用：${(error as Error).message}，保留会话设置`,
 						"warning",
 					);
 			}
@@ -294,22 +315,33 @@ export default function (pi: ExtensionAPI) {
 		}
 		const effectiveRole = role && roleCardPath ? role : undefined;
 		let activeModel = ctx.model;
-		// AI(TAG): [角色默认设置] 默认值每个角色只初始化一次，恢复会话保留用户后续选择。
+		// AI(TAG): [会话初始设置] 创建方写下的继承项优先，缺的字段落回角色配置；每个角色键只初始化一次，恢复会话保留用户后续选择。
+		const inherited = restoreInherited(ctx);
+		const roleConfig = roleDefaults(effectiveRole);
+		const defaultsKey = effectiveRole ?? "";
 		if (
-			effectiveRole &&
+			(inherited || effectiveRole) &&
 			!ctx.sessionManager
 				.getEntries()
 				.some(
 					(entry) =>
 						entry.type === "custom" &&
 						entry.customType === ROLE_DEFAULTS_ENTRY &&
-						(entry.data as { role?: string } | undefined)?.role === effectiveRole,
+						(entry.data as { role?: string } | undefined)?.role === defaultsKey,
 				)
 		) {
-			const res = await applyRoleDefaults(effectiveRole, ctx);
+			const desired: RoleDefaults = {
+				model: inherited?.model ?? roleConfig.model,
+				thinkingLevel: inherited?.thinkingLevel ?? roleConfig.thinkingLevel,
+			};
+			const res = await applyDefaults(
+				desired,
+				ctx,
+				inherited?.model !== undefined ? "继承的模型" : `角色 ${effectiveRole ?? ""} 默认模型`,
+			);
 			if (res.applied) {
 				activeModel = res.model ?? activeModel;
-				pi.appendEntry(ROLE_DEFAULTS_ENTRY, { role: effectiveRole });
+				pi.appendEntry(ROLE_DEFAULTS_ENTRY, { role: defaultsKey });
 			}
 		}
 
@@ -891,7 +923,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify((error as Error).message, "warning");
 			return;
 		}
-		const res = await applyRoleDefaults(role, ctx);
+		const res = await applyDefaults(roleDefaults(role), ctx, `角色 ${role} 默认模型`);
 		if (store !== activeStore || self !== activeMember) {
 			activeStore.releaseRoleName(role, slot, activeMember.key);
 			throw new Error("目标会话已切换，角色变更未应用");
@@ -1031,12 +1063,12 @@ export default function (pi: ExtensionAPI) {
 			const cardPath = resolveRoleCard(ctx.cwd, loaded.config, role, CONFIG_DIR_NAME).path;
 			// 没有角色卡也照开：只是没卡而已，会话退成普通会话，用 /peer-name 起名。
 			// 这种会话不记角色条目 —— 否则每次启动都会拿一个永远找不到卡的名称再警一次。
+			// 同名角色再开就保持现状；换角色才按新角色的配置走。
+			const defaults = role === self?.role ? currentDefaults(ctx) : {};
 			const result = await ctx.newSession({
-				setup: cardPath
-					? async (sessionManager) => {
-							sessionManager.appendCustomEntry(ROLE_ENTRY, { role });
-						}
-					: undefined,
+				setup: async (sessionManager) => {
+					seedSessionEntries(sessionManager, { role: cardPath ? role : undefined, ...defaults });
+				},
 				withSession: async (newCtx) => {
 					if (!newCtx.hasUI) return;
 					newCtx.ui.notify(
@@ -1045,6 +1077,45 @@ export default function (pi: ExtensionAPI) {
 							: `找不到角色 ${role} 的角色卡，已按普通会话新建；用 /peer-name 起名，` +
 									`或补上 ${CONFIG_DIR_NAME}/characters/${role}.md 后重开`,
 						cardPath ? "info" : "warning",
+					);
+				},
+			});
+			if (result.cancelled && ctx.hasUI) ctx.ui.notify("新建会话被取消", "warning");
+		}),
+	});
+
+	pi.registerCommand("peer-reload", {
+		description: "新建会话并继承当前名字、角色与模型（用法：/peer-reload）",
+		handler: peerCommand(async (args, ctx) => {
+			if (!store || !self) {
+				ctx.ui.notify("pi-peer 未启用", "warning");
+				return;
+			}
+			if (args.trim()) {
+				ctx.ui.notify("用法：/peer-reload（不带参数）", "warning");
+				return;
+			}
+			const role = self.role;
+			const cardPath = role ? resolveRoleCard(ctx.cwd, loaded.config, role, CONFIG_DIR_NAME).path : undefined;
+			// 旧会话只是不再活动，日志里留作父会话，便于回头找上下文
+			const parent = ctx.sessionManager.getSessionFile();
+			const result = await ctx.newSession({
+				parentSession: parent && fs.existsSync(parent) ? parent : undefined,
+				setup: async (sessionManager) => {
+					seedSessionEntries(sessionManager, {
+						role: cardPath ? role : undefined,
+						name: self?.name,
+						...currentDefaults(ctx),
+					});
+				},
+				withSession: async (newCtx) => {
+					if (!newCtx.hasUI) return;
+					const bare = role !== undefined && !cardPath;
+					newCtx.ui.notify(
+						bare
+							? `找不到角色 ${role} 的角色卡，已按普通会话新建，名字、模型与思考等级沿用当前`
+							: `已新建会话${role ? `（角色：${role}）` : ""}，名字、模型与思考等级沿用当前`,
+						bare ? "warning" : "info",
 					);
 				},
 			});
@@ -1136,6 +1207,40 @@ function restoreRole(ctx: ExtensionContext): { role: string; name?: string } | u
 		}
 	}
 	return role;
+}
+
+/** 创建方写进新会话的初始默认值；没有它就不按继承初始化 */
+function restoreInherited(ctx: ExtensionContext): RoleDefaults | undefined {
+	let inherited: RoleDefaults | undefined;
+	for (const entry of ctx.sessionManager.getEntries()) {
+		const e = entry as { type?: string; customType?: string; data?: { model?: unknown; thinkingLevel?: unknown } };
+		if (e.type !== "custom" || e.customType !== INHERIT_ENTRY) continue;
+		inherited = {
+			model: typeof e.data?.model === "string" && e.data.model !== "unknown" ? e.data.model : undefined,
+			thinkingLevel: THINKING_LEVELS.includes(e.data?.thinkingLevel as ThinkingLevel)
+				? (e.data?.thinkingLevel as ThinkingLevel)
+				: undefined,
+		};
+	}
+	return inherited;
+}
+
+/** 新会话的初始身份与默认值：由创建方决定，新会话只按条目应用，不重新推导 */
+export function seedSessionEntries(
+	manager: { appendCustomEntry(customType: string, data?: unknown): void },
+	seed: { role?: string; name?: string } & RoleDefaults,
+): void {
+	if (seed.role !== undefined) {
+		const entry: { role: string; name?: string } = { role: seed.role };
+		if (seed.name !== undefined) entry.name = seed.name;
+		manager.appendCustomEntry(ROLE_ENTRY, entry);
+	}
+	if (seed.name !== undefined) manager.appendCustomEntry("peer-name", { name: seed.name });
+	const defaults: RoleDefaults = {};
+	if (seed.model !== undefined) defaults.model = seed.model;
+	if (seed.thinkingLevel !== undefined) defaults.thinkingLevel = seed.thinkingLevel;
+	if (defaults.model !== undefined || defaults.thinkingLevel !== undefined)
+		manager.appendCustomEntry(INHERIT_ENTRY, defaults);
 }
 
 function livePeers(): Member[] {

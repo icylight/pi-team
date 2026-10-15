@@ -79,4 +79,4 @@ description: 编辑 pi-peer 的项目配置——`.pi/peer.json`（启用开关�
 
 ## 生效语义
 
-写入后告知用户——`canAssignRoles` 与 `canStartSessions` 每次调用时读取，修改权限无需重载；其他 `peer.json` 字段、角色卡与流程都在会话加载时读，改完需 `/reload` 或重开会话；`enabled: false` 的项目里本扩展整个不注册，要恢复先改回文件并 `/reload`。本 skill 不做文件监听或热更新。
+写入后告知用户——`canAssignRoles` 与 `canStartSessions` 每次调用时读取，修改权限无需重载；其他 `peer.json` 字段、角色卡与流程都在会话加载时读，改完需 `/reload`，或用 `/peer-reload` 开一个继承当前角色与模型的新会话；`enabled: false` 的项目里本扩展整个不注册，要恢复先改回文件并 `/reload`。本 skill 不做文件监听或热更新。

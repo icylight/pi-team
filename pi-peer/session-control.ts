@@ -6,6 +6,7 @@ import type {
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { ThinkingLevel } from "./config.ts";
 import { MAX_TEXT, type Member, newMessageId, type PeerMessage, PeerStore, type ResolveResult } from "./store.ts";
 
 // AI(TAG): [远程会话交接] 授权请求只进入目标命令上下文；确认新身份和实际任务文件，不替台账认领。
@@ -39,7 +40,7 @@ interface Dependencies {
 	get(): Runtime | undefined;
 	canStart(role?: string): boolean;
 	resolve(to: string): ResolveResult;
-	seed(manager: SessionManager, member: Member): void;
+	seed(manager: SessionManager, member: Member, defaults: { model?: string; thinkingLevel?: ThinkingLevel }): void;
 }
 const result = (value: string) => ({ content: [{ type: "text" as const, text: value }], details: {} });
 
@@ -155,7 +156,10 @@ export function registerSessionControl(pi: ExtensionAPI, deps: Dependencies) {
 					parentSession: old.sessionFile && fs.existsSync(old.sessionFile) ? old.sessionFile : undefined,
 					setup: async (manager) => {
 						if (!manager.getSessionFile()) throw new Error("没有持久会话路径");
-						deps.seed(manager, old);
+						deps.seed(manager, old, {
+							model: old.model === "unknown" ? undefined : old.model,
+							thinkingLevel: runtime.ctx.thinkingLevel,
+						});
 						manager.appendCustomEntry(SESSION_TASK_ENTRY, {
 							requestId: job.id,
 							from: job.from,

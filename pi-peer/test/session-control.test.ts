@@ -29,6 +29,7 @@ function fixture() {
 			fail: "",
 			beforeSwitch: () => {},
 			dispatch: [] as string[],
+			seeds: [] as any[],
 			resolve: undefined as ResolveResult | undefined,
 			member: {
 				key,
@@ -60,6 +61,7 @@ function fixture() {
 				return state.pending;
 			},
 			ui: { notify: () => assert.equal(invalidated, false, "旧上下文已失效") },
+			thinkingLevel: "high",
 			get sessionManager() {
 				assert.equal(invalidated, false, "旧上下文已失效");
 				return state.inMemory ? SessionManager.inMemory(cwd) : manager;
@@ -123,7 +125,10 @@ function fixture() {
 			get: () => ({ store, member: state.member, ctx, roleChanging: state.roleChanging }),
 			canStart: (role) => role === "owner" && allowed,
 			resolve: (to) => state.resolve ?? store.resolve(to, state.member.key),
-			seed: (sm, member) => sm.appendCustomEntry("peer-role", { role: member.role ?? "", name: member.name }),
+			seed: (sm, member, defaults) => {
+				state.seeds.push(defaults);
+				sm.appendCustomEntry("peer-role", { role: member.role ?? "", name: member.name });
+			},
 		});
 		return { store, state, ctx, tools, commands, controller };
 	}
@@ -179,6 +184,7 @@ test("新会话成功由新 key 确认；真实 SessionManager 写任务，旧�
 		assert.equal(fs.readFileSync(old, "utf8"), before);
 		assert.match(fs.readFileSync(h.target.state.member.sessionFile!, "utf8"), /synthetic task body/);
 		assert.equal(h.target.state.member.role, "dev");
+		assert.deepEqual(h.target.state.seeds, [{ model: "test/model", thinkingLevel: "high" }]);
 		await h.target.controller.handle(request.msg);
 		assert.equal(h.target.state.newCalls, 1);
 	} finally {
