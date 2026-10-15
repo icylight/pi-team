@@ -149,6 +149,11 @@ export function registerSessionControl(pi: ExtensionAPI, deps: Dependencies) {
 				root = runtime.store.root,
 				cwd = runtime.member.cwd;
 			const replyStore = new PeerStore(root, cwd);
+			// 替换一开始目标会话的 ctx 就失效，setup 里读不到它：要继承的值先取出来
+			const inherited = {
+				model: old.model === "unknown" ? undefined : old.model,
+				thinkingLevel: runtime.ctx.thinkingLevel,
+			};
 			let phase: Phase = "unknown",
 				taskEntryId: string | undefined;
 			try {
@@ -156,10 +161,7 @@ export function registerSessionControl(pi: ExtensionAPI, deps: Dependencies) {
 					parentSession: old.sessionFile && fs.existsSync(old.sessionFile) ? old.sessionFile : undefined,
 					setup: async (manager) => {
 						if (!manager.getSessionFile()) throw new Error("没有持久会话路径");
-						deps.seed(manager, old, {
-							model: old.model === "unknown" ? undefined : old.model,
-							thinkingLevel: runtime.ctx.thinkingLevel,
-						});
+						deps.seed(manager, old, inherited);
 						manager.appendCustomEntry(SESSION_TASK_ENTRY, {
 							requestId: job.id,
 							from: job.from,

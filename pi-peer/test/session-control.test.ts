@@ -61,7 +61,10 @@ function fixture() {
 				return state.pending;
 			},
 			ui: { notify: () => assert.equal(invalidated, false, "旧上下文已失效") },
-			thinkingLevel: "high",
+			get thinkingLevel() {
+				assert.equal(invalidated, false, "旧上下文已失效");
+				return "high";
+			},
 			get sessionManager() {
 				assert.equal(invalidated, false, "旧上下文已失效");
 				return state.inMemory ? SessionManager.inMemory(cwd) : manager;

@@ -1108,14 +1108,12 @@ export default function (pi: ExtensionAPI) {
 			const cardPath = role ? resolveRoleCard(ctx.cwd, loaded.config, role, CONFIG_DIR_NAME).path : undefined;
 			// 旧会话只是不再活动，日志里留作父会话，便于回头找上下文
 			const parent = ctx.sessionManager.getSessionFile();
+			// 替换一开始旧 ctx 就失效，setup 里不能再读它：要继承的值先取出来
+			const seed = { role: cardPath ? role : undefined, name: self?.name, ...currentDefaults(ctx) };
 			const result = await ctx.newSession({
 				parentSession: parent && fs.existsSync(parent) ? parent : undefined,
 				setup: async (sessionManager) => {
-					seedSessionEntries(sessionManager, {
-						role: cardPath ? role : undefined,
-						name: self?.name,
-						...currentDefaults(ctx),
-					});
+					seedSessionEntries(sessionManager, seed);
 				},
 				withSession: async (newCtx) => {
 					if (!newCtx.hasUI) return;
