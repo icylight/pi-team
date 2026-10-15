@@ -23,17 +23,20 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { buildDigest, buildWakeText, renderStale } from "./core/digest.ts";
+import { buildDigest, renderStale } from "./core/digest.ts";
 import { describeError, formatHistory, formatList, formatOrder, formatWaiting } from "./core/format.ts";
 import {
-	defaultDbPath,
-	eventsOf,
-	initLedger,
-	isTerminal,
-	isWaitingState,
-	openLedger,
-	statesOf,
-} from "./core/schema.ts";
+	acknowledgeNotification,
+	claimNotification,
+	consumeNotification,
+	deferNotification,
+	listNotifications,
+	NOTIFICATION_PROTOCOL,
+	notificationPath,
+	openNotifications,
+	reconcileNotifications,
+} from "./core/notifications.ts";
+import { defaultDbPath, eventsOf, initLedger, openLedger, statesOf } from "./core/schema.ts";
 import {
 	addDep,
 	countBlockedDownstream,
@@ -48,7 +51,7 @@ import {
 	updateOrder,
 	waitingOrders,
 } from "./core/store.ts";
-import { isHumanActor, type Order, STALE_MINUTES, type StateRole } from "./core/types.ts";
+import { type Order, STALE_MINUTES, type StateRole } from "./core/types.ts";
 import {
 	buildWatchText,
 	followsRole,
@@ -319,6 +322,13 @@ export default function (pi: ExtensionAPI) {
 		scheduleWatch();
 	}
 
+	pi.events.on("peer:identity-changed", (data) => {
+		const change = data as { name?: string } | undefined;
+		if (typeof change?.name !== "string") return;
+		identity = change.name.trim();
+		if (watchCtx) startWatch(watchCtx);
+	});
+
 	// ── 工具返回 ────────────────────────────────────
 
 	type ToolResult = { content: { type: "text"; text: string }[]; details: Record<string, unknown> };
@@ -346,65 +356,144 @@ export default function (pi: ExtensionAPI) {
 	const WAKE_RESULT_CHANNEL = "peer:deliver:result";
 	const WAKE_TIMEOUT_MS = 400;
 
-	/**
-	 * 问 pi-peer：这批候选里第一个在线且空闲的，把这句话带过去。
-	 *
-	 * 要求空闲是故意的：peer 的投递会 steer 插进对方当前这轮，把正在做事的人带偏。
-	 * 忙就跳过，对方下一轮开始时读到的启动摘要里本来就有这条单。
-	 */
-	async function wake(targets: string[], text: string): Promise<string> {
-		if (!api?.events || !targets.length) return "";
+	/** 请求空闲目标接收本次租约；返回只确认收件箱写入，送达另等持久化事件。 */
+	async function wake(
+		targets: string[],
+		text: string,
+		handoff: { id: string; lease: string },
+	): Promise<{ accepted: boolean; detail: string }> {
+		if (!api?.events || !targets.length) return { accepted: false, detail: "没有可用 peer 或候选" };
 		const events = api.events;
 		const id = `wake-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-		const reply = await new Promise<string>((resolve) => {
+		const reply = await new Promise<{ accepted: boolean; detail: string }>((resolve) => {
 			let unsubscribe: (() => void) | undefined;
-			const finish = (note: string) => {
+			const finish = (note: { accepted: boolean; detail: string }) => {
 				clearTimeout(timer);
 				unsubscribe?.();
 				resolve(note);
 			};
-			const timer = setTimeout(() => finish(""), WAKE_TIMEOUT_MS);
+			const timer = setTimeout(
+				() => finish({ accepted: false, detail: "peer 确认超时，留待恢复" }),
+				WAKE_TIMEOUT_MS,
+			);
 			unsubscribe = events.on(WAKE_RESULT_CHANNEL, (data) => {
 				const replyData = data as { id?: string; ok?: boolean; to?: string; detail?: string } | undefined;
 				if (replyData?.id !== id) return;
-				if (replyData.ok) finish(`已通知 ${replyData.to ?? targets[0]}`);
-				else finish(`没叫到人（${replyData.detail ?? "未知原因"}）`);
+				finish({
+					accepted: replyData.ok === true,
+					detail: replyData.detail ?? (replyData.ok ? "已写入收件箱，等待注入确认" : "未知原因"),
+				});
 			});
-			events.emit(WAKE_CHANNEL, { id, targets, text, requireIdle: true });
+			events.emit(WAKE_CHANNEL, { id, targets, text, requireIdle: true, priority: "normal", handoff });
 		});
 		return reply;
 	}
 
-	/**
-	 * 写库后的派工：唤对方一次，把结果写成一行附在工具返回里。
-	 * 唤不到不算失败——库已经落了，摘要会在对方（或自己）下次开会话时把它拽出来。
-	 * 两种不值得唤的：自己（认领后的在做单、自派）、人工执行者（没有叫这个名的会话）。
-	 */
-	async function wakeFor(order: Order, kind: "assigned" | "handoff" | "unblocked", me: string): Promise<string> {
-		const targets = order.nextActors.filter((name) => name !== me && !isHumanActor(name));
-		if (!targets.length) return "";
-		return wake(targets, buildWakeText(order, kind));
+	/** 耐久交接可由任意同项目会话恢复，队列不依赖发起者存活。 */
+	let deliveryTimer: NodeJS.Timeout | undefined;
+	let flushing = false;
+	async function flushNotifications(ctx?: ExtensionContext): Promise<void> {
+		if (flushing || !fs.existsSync(dbPathFor(ctx))) return;
+		flushing = true;
+		let queue: ReturnType<typeof openNotifications> | undefined;
+		try {
+			queue = openNotifications(notificationPath(dbPathFor(ctx)));
+			const currentQueue = queue;
+			withDb(ctx, (db) => reconcileNotifications(db, currentQueue));
+			for (const row of listNotifications(queue)
+				.filter((n) => n.status === "waiting" || (n.status === "sending" && n.leaseUntil <= Date.now()))
+				.slice(0, 20)) {
+				const claimed = claimNotification(queue, row.id);
+				if (!claimed?.lease) continue;
+				const result = await wake(claimed.targets, claimed.text, { id: claimed.id, lease: claimed.lease });
+				if (!result.accepted) deferNotification(queue, claimed.id, claimed.lease, result.detail);
+			}
+		} finally {
+			queue?.close();
+			flushing = false;
+		}
 	}
+	function scheduleDelivery(ctx: ExtensionContext): void {
+		if (deliveryTimer) clearTimeout(deliveryTimer);
+		deliveryTimer = setTimeout(() => {
+			void flushNotifications(ctx)
+				.catch(() => {})
+				.finally(() => {
+					if (watchCtx === ctx) scheduleDelivery(ctx);
+				});
+		}, 5_000);
+		deliveryTimer.unref?.();
+	}
+	pi.events.on("work-orders:consume-handoff", (data) => {
+		const request = data as
+			| { id?: string; lease?: string; identities?: string[]; alreadyPersisted?: boolean; deliver?: () => void }
+			| undefined;
+		if (
+			!watchCtx ||
+			agentBusy ||
+			watchCtx.isIdle?.() === false ||
+			typeof request?.id !== "string" ||
+			typeof request.lease !== "string" ||
+			!Array.isArray(request.identities) ||
+			typeof request.deliver !== "function"
+		)
+			return;
+		const queue = openNotifications(notificationPath(dbPathFor(watchCtx)));
+		try {
+			withDb(watchCtx, (db) =>
+				consumeNotification(
+					db,
+					queue,
+					request.id!,
+					request.lease!,
+					request.identities!,
+					request.deliver!,
+					Date.now(),
+					request.alreadyPersisted === true,
+				),
+			);
+		} finally {
+			queue.close();
+		}
+	});
+
+	pi.events.on("work-orders:handoff-injected", (data) => {
+		const request = data as { id?: string; lease?: string; wake?: () => void } | undefined;
+		if (!watchCtx || typeof request?.id !== "string" || typeof request.lease !== "string") return;
+		const queue = openNotifications(notificationPath(dbPathFor(watchCtx)));
+		let acknowledged = false;
+		try {
+			acknowledged = acknowledgeNotification(queue, request.id, request.lease);
+		} finally {
+			queue.close();
+		}
+		if (acknowledged) request.wake?.();
+	});
 
 	interface Mutation {
 		text: string;
 		order: Order;
-		/** 这次写库之后该不该叫人、叫谁 */
-		wake: "assigned" | "handoff" | "unblocked" | "none";
-		/** 收口解锁的下游：wake=unblocked 时要叫的人 */
-		unblocked: Order[];
 	}
 
 	/** 写库之后统一收尾：派工的结果附在返回文本里 */
-	async function finishMutation(mutation: Mutation, me: string): Promise<ToolResult> {
-		if (mutation.wake === "none") return ok(mutation.text);
-		const notes: string[] = [];
-		const targets = mutation.wake === "unblocked" ? mutation.unblocked : [mutation.order];
-		for (const order of targets) {
-			const note = await wakeFor(order, mutation.wake, me);
-			if (note) notes.push(targets.length > 1 ? `${order.id}：${note}` : note);
+	async function finishMutation(mutation: Mutation, _me: string, ctx: ExtensionContext): Promise<ToolResult> {
+		try {
+			await flushNotifications(ctx);
+			const queue = openNotifications(notificationPath(dbPathFor(ctx)));
+			try {
+				const rows = listNotifications(queue, mutation.order.id);
+				const note = rows.length
+					? rows.map((n) => `${n.status}：${n.reason || "等待目标会话持久化确认"}`).join("；")
+					: "当前无须通知（本人、人工作业或等待依赖）";
+				return ok(`${mutation.text}\n台账写入成功；通知：${note}。通知不代表已认领。`);
+			} finally {
+				queue.close();
+			}
+		} catch (error) {
+			return ok(
+				`${mutation.text}\n台账写入成功；通知记录失败：${describeError(error)}，恢复扫描会重建交接，勿重复业务写入。`,
+			);
 		}
-		return ok([mutation.text, ...notes].filter(Boolean).join("\n"));
 	}
 
 	// ── 工具 ────────────────────────────────────────
@@ -441,6 +530,23 @@ export default function (pi: ExtensionAPI) {
 					db.close();
 				}
 			});
+		},
+	});
+
+	pi.registerTool({
+		name: "orders_notifications",
+		label: "工单通知状态",
+		description: "只读查询本项目交接通知的等待、传输中、已注入、失效或失败状态；与台账写入和认领状态分别看。",
+		parameters: Type.Object({ id: Type.Optional(Type.String({ description: "只看此工单；省略看全部通知" })) }),
+		async execute(_callId, params, _signal, _update, ctx) {
+			const file = notificationPath(dbPathFor(ctx));
+			if (!fs.existsSync(file)) return ok("尚无通知记录；不代表所有工单已通知");
+			const queue = openNotifications(file, true);
+			try {
+				return ok(JSON.stringify(listNotifications(queue, params.id).slice(-100), null, 2));
+			} finally {
+				queue.close();
+			}
 		},
 	});
 
@@ -542,12 +648,12 @@ export default function (pi: ExtensionAPI) {
 						},
 						{ actor: me, reason: params.reason ?? "建单" },
 					);
-					return { text: formatOrder(view), order: view, wake: "assigned", unblocked: [] };
+					return { text: formatOrder(view), order: view };
 				});
 			} catch (error) {
 				return fail(error);
 			}
-			return finishMutation(mutation, me);
+			return finishMutation(mutation, me, ctx);
 		},
 	});
 
@@ -618,27 +724,12 @@ export default function (pi: ExtensionAPI) {
 						const downstream = countBlockedDownstream(db, params.id);
 						if (downstream > 0) notes.push(`下游还有 ${downstream} 条未收口，确认它们的前置是否已经落空`);
 					}
-					// 收口解锁下游：把刚变可开工、还没人接的下游带回去，写完就派下去
-					const unblocked = isTerminal(db, view.state)
-						? readyOrders(db).filter(
-								(o) => o.state === statesOf(db).claimable && view.blocks.includes(o.id) && o.nextActors.length,
-							)
-						: [];
-					// 叫人的判据：进了「等人动」的状态就叫当事人；收口则改叫刚解锁的下游；
-					// 认领/阻塞这类不叫人（前者是自己接手，后者谁也没得动）。
-					const kind = isTerminal(db, view.state)
-						? unblocked.length
-							? "unblocked"
-							: "none"
-						: isWaitingState(db, view.state)
-							? "handoff"
-							: "none";
-					return { text: [formatOrder(view), ...notes].join("\n\n"), order: view, wake: kind, unblocked };
+					return { text: [formatOrder(view), ...notes].join("\n\n"), order: view };
 				});
 			} catch (error) {
 				return fail(error);
 			}
-			return finishMutation(mutation, me);
+			return finishMutation(mutation, me, ctx);
 		},
 	});
 
@@ -706,13 +797,20 @@ export default function (pi: ExtensionAPI) {
 	// 身份在会话启动时问一次 peer 并缓存：工具调用时 resolveActor 要同步拿到它。
 	// 拿到身份之后就能判「这个会话是不是该负责定时提醒的那个角色」。
 	pi.on("session_start", async (_event, ctx) => {
+		agentBusy = false;
 		identity = await askPeerWhoami();
 		startWatch(ctx);
+		pi.events.emit("peer:handoff-support", { version: NOTIFICATION_PROTOCOL });
+		scheduleDelivery(ctx);
 	});
 
 	// 会话结束、切走、重载：定时器跟着这个会话的生命周期走，别留给下一个会话
 	pi.on("session_shutdown", () => {
 		stopWatch();
+		watchCtx = undefined;
+		pi.events.emit("peer:handoff-support", { version: 0 });
+		if (deliveryTimer) clearTimeout(deliveryTimer);
+		deliveryTimer = undefined;
 		watchCtx = undefined;
 	});
 

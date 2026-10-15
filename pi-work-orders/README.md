@@ -25,6 +25,10 @@
 点进项目页看状态分列看板（待领/在做/待核/返工/暂停，空列不显示），收口与取消折叠在底部；
 单条详情带正文、动作记录与内容入口的 md。
 
+项目卡片同时显示依赖 ready、责任候选、匹配的角色实例、心跳/忙闲、关联在做工单及当前阶段的通知结果。基础角色可关联同角色实例，实例负载只按实例名关联；会话空闲不代表没有在做工单。缺失、过期或无法判断的状态明确显示，不推定为可接手。历史通知与当前阶段分开，不用旧的 delivered 冒充新交接已送达。
+
+这些是页面读取时的只读观察，刷新后更新；不初始化通知库、不清理会话注册，不自动派工或认领。peer 根目录沿用 `PI_PEER_ROOT`，未设置时读取 `~/.pi/peers`。
+
 ```
 /orders web         # 没有在跑的就起一个，随后打开浏览器
 /orders web stop    # 停掉常驻的那个
@@ -116,7 +120,11 @@ cd pi-work-orders/web && npm install && npm run build   # 一次即可，改了 
 
 **一、每轮对话开始算一段摘要进系统提示**（`before_agent_start`）：等你的、停滞超阀值的、可开工没人接的。只用台账、不用 peer 也看得到——打开项目就知道有东西在等，自己就是执行者。库没建、或没在等人的单时不占上下文。
 
-**二、写库即派工**：建单、交付给复核人、收口解锁下游时，把「该你了」投给下一步的名字。通道是 peer 的事件总线（`peer:deliver`），**只投给空闲的会话**：对方在跑一轮时不打扰，库已经落了、不是失败，下一轮开始时启动摘要里就有它。派给自己（认领、自派）不发，等人工（`用户`）的单也不发——没有叫这个名的会话。终态不叫当事人，只叫刚解锁的下游。
+**二、耐久交接**：业务台账写入与通知分别呈现。每次写入后及会话存活期间每隔 5 秒扫描当前有效交接，将运行记录存到同项目 `.work-orders/notifications.sqlite`，不改原台账 schema。候选忙碌、离线或没有 peer 时保留 waiting 原因；会话恢复后重建与重试，不重新执行业务写入。任意加载台账的同项目会话均可接力，所有会话都退出时暂停，重启后恢复，不依赖 owner 人工重发。定时停滞提醒的 followRole 与这条恢复链路无关。
+
+交接身份依据状态、责任人及交接/依赖事件，不使用普通行 revision。改正文不重发；转派、取消、认领或阶段取代使旧通知失效。派给本次交接操作者本人或人工执行者不通知；终态只使有效下游交接恢复。目标收到后再次校验当前业务与租约，只在空闲时同步写入会话；普通交接不 steer。按当前分支 entry id 在宿主当前会话 JSONL 中核对匹配记录后才记 delivered，不能把发送 API 返回或 `message_end` 当落盘证明。空白会话须先以 followUp 触发首次用户消息，再补持久化确认；确认等待有期限，后续由耐久租约恢复，未落盘不报送达。纯内存会话无法确认耐久交接。
+
+用 `orders_notifications(id="T01")` 查询等待、传输、已持久化、失效或失败及原因。sending 只代表传输租约；delivered 不代表已认领或完成。离线/忙碌不会消耗实际注入重试次数。注入或确认失败的实际尝试有界，达到上限记 failed/结果未知，须人工核实；不承诺跨通知库与会话日志的 exactly-once。旧版目标不支持消费协议时明确等待升级，不降级成无校验文本。
 
 **三、定时提醒跟着一个角色会话走**：配置里指定的角色（`followRole`）活着时，自己隔一会儿自查一次，有停滞的单就把汇总注入成一条用户消息——等于它自己叫自己。会话不在就没人提，这是这个设计的边界。
 
@@ -151,6 +159,7 @@ cd pi-work-orders/web && npm install && npm run build   # 一次即可，改了 
 | `orders_init` | 建库，同时写本轮需求（目标/边界/验收口径/基线） |
 | `orders_list` | 列单：默认未收口；`ready` 只看可开工的；`next` 只看等某人的；`state` 看某个状态（终态也算命中）；`history=true` 连终态一起列 |
 | `orders_show` | 看一条的正文、内容入口、依赖、下游、终止依据，以及最近几次动作（默认 5 条） |
+| `orders_notifications` | 只读查询通知状态和原因，`id` 可限工单；返回最近更新的通知记录，不表示认领 |
 | `orders_create` | 建单，可带 `dependsOn`；`nextActors` 传名字数组（首选在前） |
 | `orders_update` | 改状态或字段；`appendBody` 用于范围修订（追加，不覆盖旧句）；`nextActors` 给多人就是重设备选。字段与追加同一次事务，要么全成要么全不动；`body` 传空串表示这次不改正文 |
 | `orders_dep` | 加/删依赖边 |
@@ -181,6 +190,7 @@ core/store.ts     增改查、依赖、校验、等待与停滞查询
 core/waiting.ts   等待分类与依赖解锁起点（只读）
 core/digest.ts    摘要与派工文案（纯函数）
 core/watch.ts     定时提醒的配置与提醒文案（纯函数）
+core/notifications.ts  交接快照、耐久记录、租约、有效性校验与持久化确认
 core/format.ts    给人看的文本视图
 skills/work-orders/   给 agent 看的操作约定
 ```
@@ -199,12 +209,12 @@ skills/work-orders/   给 agent 看的操作约定
 
 | 频道 | 方向 | 载荷 |
 |---|---|---|
-| `peer:deliver` | 台账 → peer | `{ id, targets: string[], text }` |
+| `peer:deliver` | 台账 → peer | `{ id, targets: string[], text, requireIdle: true, priority: "normal", handoff: { id, lease } }` |
 | `peer:deliver:result` | peer → 台账 | `{ id, ok, to?, detail }` |
 | `peer:whoami` | 台账 → peer | `{ id }` |
 | `peer:whoami:result` | peer → 台账 | `{ id, name }` |
 
-peer 不在场时：投递等 400ms 超时按「没叫到人」处理，身份退回会话名或「用户」。定时提醒的 `followRole` 也跟着退回会话名。库照常写，摘要照常注入。
+peer 不在场或请求超时时，通知记录保留等待原因并恢复重试，业务写入成功不因此回滚。`peer:deliver:result.ok` 仅确认收件箱写入，不确认送达。接收端通过 `work-orders:consume-handoff` 请求当前项目台账同步校验和注入，通过 `work-orders:handoff-injected` 在消息持久化后确认。身份仍退回会话名或「用户」；摘要与定时提醒保持原有兜底。
 
 ## 未做
 

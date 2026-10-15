@@ -1,3 +1,5 @@
+import { DispatchFacts } from "@/components/dispatch-facts";
+import type { DispatchOrder, DispatchSnapshot } from "../../core/dispatch";
 import Link from "next/link";
 import { waitedLabel } from "@/components/orders-table";
 import { roleOfState } from "@/components/state-badge";
@@ -13,12 +15,14 @@ export function Board({
 	states,
 	waiting,
 	now,
+	dispatch,
 }: {
 	slug: string;
 	orders: readonly ListedOrder[];
 	states: Record<StateRole, string>;
 	waiting: readonly Waiting[];
 	now: number;
+	dispatch?: DispatchSnapshot;
 }) {
 	const byRole = new Map<StateRole, ListedOrder[]>();
 	for (const o of orders) {
@@ -33,6 +37,7 @@ export function Board({
 
 	const orderById = new Map(orders.map((o) => [o.id, o]));
 	const waitedByOrder = new Map(waiting.map((w) => [w.order.id, w]));
+	const dispatchById = new Map(dispatch?.orders.map((item) => [item.id, item]));
 
 	return (
 		<div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-3 items-start">
@@ -50,6 +55,8 @@ export function Board({
 								order={o}
 								waited={waitedLabel(waitedByOrder.get(o.id), now)}
 								blockedBy={unresolvedDeps(o, orderById, states)}
+								dispatch={dispatchById.get(o.id)}
+								observation={dispatch}
 							/>
 						))}
 					</div>
@@ -73,11 +80,15 @@ function Card({
 	order,
 	waited,
 	blockedBy,
+	dispatch,
+	observation,
 }: {
 	slug: string;
 	order: ListedOrder;
 	waited: string | null;
 	blockedBy: string[];
+	dispatch?: DispatchOrder;
+	observation?: DispatchSnapshot;
 }) {
 	const next = order.nextActors[0];
 	return (
@@ -94,6 +105,7 @@ function Card({
 				下一步：{next ?? "未指定"}
 				{blockedBy.length > 0 ? <span> · 卡在 {blockedBy.join(" ")}</span> : null}
 			</p>
+			{dispatch && observation ? <DispatchFacts item={dispatch} snapshot={observation} /> : null}
 		</Link>
 	);
 }

@@ -71,16 +71,51 @@ function ProjectBoard({ ledger, now }: { ledger: LedgerSnapshot; now: number }) 
 							需求：{req.goal.length > 80 ? `${req.goal.slice(0, 80)}…` : req.goal}
 						</CollapsibleTrigger>
 						<CollapsibleContent className="mt-2 rounded-md border bg-muted/30 p-3 text-xs leading-relaxed text-muted-foreground">
-							<p><span className="text-foreground">目标</span>　{req.goal}</p>
-							{req.scope ? <p className="mt-1"><span className="text-foreground">边界</span>　{req.scope}</p> : null}
-							{req.acceptance ? <p className="mt-1"><span className="text-foreground">验收</span>　{req.acceptance}</p> : null}
-							{req.baseline ? <p className="mt-1"><span className="text-foreground">基线</span>　{req.baseline}</p> : null}
+							<p>
+								<span className="text-foreground">目标</span>　{req.goal}
+							</p>
+							{req.scope ? (
+								<p className="mt-1">
+									<span className="text-foreground">边界</span>　{req.scope}
+								</p>
+							) : null}
+							{req.acceptance ? (
+								<p className="mt-1">
+									<span className="text-foreground">验收</span>　{req.acceptance}
+								</p>
+							) : null}
+							{req.baseline ? (
+								<p className="mt-1">
+									<span className="text-foreground">基线</span>　{req.baseline}
+								</p>
+							) : null}
 						</CollapsibleContent>
 					</Collapsible>
 				) : null}
 			</header>
 
-			<Board slug={ledger.slug} orders={orders} states={states} waiting={ledger.waiting ?? []} now={now} />
+			{ledger.dispatch ? (
+				<section className="mb-4 rounded-md border p-3 text-xs text-muted-foreground" aria-label="调度快照">
+					<p>
+						采样于 {new Date(ledger.dispatch.observedAt).toISOString()}
+						，刷新页面更新。可开工只看业务前置，不表示有人空闲；消息落盘不表示已认领。
+					</p>
+					{ledger.dispatch.peers.issues.map((issue) => (
+						<p key={issue} className="mt-1">
+							{issue}
+						</p>
+					))}
+					{ledger.dispatch.notificationError ? <p className="mt-1">{ledger.dispatch.notificationError}</p> : null}
+				</section>
+			) : null}
+			<Board
+				slug={ledger.slug}
+				orders={orders}
+				states={states}
+				waiting={ledger.waiting ?? []}
+				now={now}
+				dispatch={ledger.dispatch}
+			/>
 
 			{closed.length ? (
 				<Collapsible className="mt-6">

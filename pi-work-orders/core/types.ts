@@ -72,7 +72,7 @@ export function isHumanActor(name: string): boolean {
 }
 
 /** 台账事件：只追加，不改。状态从哪来到哪去，问它 */
-export type EventKind = "create" | "state" | "field" | "dep-add" | "dep-remove";
+export type EventKind = "create" | "state" | "field" | "handoff" | "dep-add" | "dep-remove";
 
 export interface OrderEvent {
 	id: number;

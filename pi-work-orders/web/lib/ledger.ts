@@ -8,6 +8,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { readDispatch, type DispatchSnapshot } from "../../core/dispatch.ts";
 import { eventsOf, openLedger, statesOf } from "../../core/schema.ts";
 import { getOrder, listOrders, requirementOf, staleWaiting, waitingOrders } from "../../core/store.ts";
 import {
@@ -36,6 +37,7 @@ export interface LedgerSnapshot {
 	orders?: ListedOrder[];
 	waiting?: Waiting[];
 	stale?: Waiting[];
+	dispatch?: DispatchSnapshot;
 }
 
 export interface OrderPageData {
@@ -80,6 +82,12 @@ export function snapshot(ref: LedgerRef): LedgerSnapshot {
 			orders: listOrders(db, { history: true }),
 			waiting: waitingOrders(db),
 			stale: staleWaiting(db, staleMinutes()),
+			dispatch: readDispatch(
+				db,
+				ref.dbPath,
+				ref.dir,
+				process.env.PI_PEER_ROOT?.trim() || path.join(os.homedir(), ".pi", "peers"),
+			),
 		};
 	} catch (error) {
 		return { ...base, error: readableError(readError(error), ref.dir) };

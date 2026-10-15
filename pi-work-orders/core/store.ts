@@ -460,6 +460,9 @@ export function updateOrder(
 		) {
 			logEvent(db, { orderId: id, actor: ctx.actor, kind: "field", note: ctx.reason });
 		}
+		if (!stateChanged && JSON.stringify(nextActors) !== JSON.stringify(old.nextActors)) {
+			logEvent(db, { orderId: id, actor: ctx.actor, kind: "handoff", note: ctx.reason });
+		}
 		db.exec("COMMIT;");
 	} catch (error) {
 		db.exec("ROLLBACK;");

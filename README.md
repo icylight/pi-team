@@ -5,7 +5,7 @@ pi 的多会话协作工具：用 pi-peer 沟通，用 pi-work-orders 记录任�
 - **[pi-peer](pi-peer/README.md)**：同机会话发现、消息投递、角色卡与流程加载。
 - **[pi-work-orders](pi-work-orders/README.md)**：SQLite 工单台账、依赖、交接依据与停滞提醒。
 
-两个包通过 pi 的事件总线协作，没有相互导入源码。未加载 pi-peer 时，工单仍可读写；消息唤醒不可用。
+扩展运行时通过 pi 的事件总线协作，联合视图只读引用 peer 元数据。未加载 pi-peer 时，工单仍可读写；消息唤醒不可用。
 
 ## 安装
 
@@ -38,7 +38,7 @@ pi install /path/to/pi-team
 
 角色卡、流程和定时提醒由使用方项目的 `.pi/peer.json` 配置，不随本包提供。配置与完整用法见各子包 README。
 
-Agent 可用 `peer_list`、`peer_send`、`peer_inbox` 通信，用 `orders_*` 工具建单、认领、交付和复核。
+Agent 可用 `peer_list`、`peer_send`、`peer_inbox` 通信，用 `orders_*` 工具建单、认领、交付和复核。角色配置 `canAssignRoles: true` 后，还可用 `peer_assign_role` 给同项目其他空闲会话分配角色，详见 [角色调度权限](pi-peer/README.md#角色调度权限)。`canStartSessions: true` 则独立授权 `peer_new_session`，让已有空闲 agent 新建会话并接收任务，详见 [会话交接](pi-peer/README.md#让已有-agent-新建会话)。
 
 工单 skill 只规定台账操作。角色分工、派工判断与验收标准由使用方项目确定；本包不要求安装额外的管理类 skill。
 

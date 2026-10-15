@@ -174,13 +174,14 @@ test("工具支持内容入口的建单、替换、清空与版本冲突", async
 	assert.match(clear, /rev 3/);
 });
 
-test("扩展挂载后注册 7 个工具和 1 个命令", () => {
+test("扩展注册工单工具、通知查询和 orders 命令", () => {
 	const { tools, commands } = mount();
 	assert.deepEqual([...tools.keys()].sort(), [
 		"orders_create",
 		"orders_dep",
 		"orders_init",
 		"orders_list",
+		"orders_notifications",
 		"orders_requirement",
 		"orders_show",
 		"orders_update",
@@ -328,10 +329,12 @@ test("建单后唤醒下一步的人，并把结果写在返回里", async () =>
 	await call(tools, "orders_init", {}, ctx);
 
 	const out = await call(tools, "orders_create", { title: "实现排序", nextActors: ["dev", "qa"] }, ctx);
-	assert.match(out, /已通知 dev/);
+	assert.match(out, /sending：.*等待目标会话持久化确认/);
 	assert.equal(sent.length, 1, "只投一次，候选列表交给 peer 挑在线的那个");
 	assert.deepEqual(sent[0].targets, ["dev", "qa"]);
-	assert.match(sent[0].text, /新单 T01/);
+	assert.match(sent[0].text, /工单交接 T01/);
+	assert.equal(sent[0].priority, "normal");
+	assert.equal(typeof sent[0].handoff.lease, "string");
 });
 
 test("peer 不在场时不算失败：库已落，返回里说明没唤到", async () => {
@@ -370,11 +373,11 @@ test("交付时唤醒复核人，收口时改为唤醒刚解锁的下游", async
 
 	await call(tools, "orders_update", { id: "T01", state: "在做", reason: "接了" }, ctx);
 	await call(tools, "orders_update", { id: "T01", state: "待复核", nextActors: ["qa"], reason: "做完了" }, ctx);
-	assert.match(sent.at(-1).text, /交到你手上/);
+	assert.match(sent.at(-1).text, /状态：待复核/);
 
 	// 收口解锁下游 T02：这时该动的是 T02 的人，不是 T01 的复核人
 	await call(tools, "orders_update", { id: "T01", state: "已收口", closingBasis: "a.md", reason: "过了" }, ctx);
-	assert.match(sent.at(-1).text, /前置已收口/);
+	assert.match(sent.at(-1).text, /状态：待认领/);
 	assert.match(sent.at(-1).text, /T02/);
 });
 
@@ -469,7 +472,7 @@ test("收口一条没有下游的单：不把已收口的单再交回给刚收�
 
 	// 建单时投过一次；在做不叫人；收口没有下游，也不该把 T01 交回给 qa
 	assert.equal(sent.length, 1);
-	assert.match(sent[0].text, /新单 T01/);
+	assert.match(sent[0].text, /工单交接 T01/);
 });
 
 // ── 身份：没有 peer 也要有个稳定的 actor ─────────────
@@ -526,7 +529,7 @@ test("派工要求对方空闲：忙的不投，如实回报", async () => {
 
 	const out = await call(tools, "orders_create", { title: "实现排序", nextActors: ["dev"] }, ctx);
 	assert.match(out, /待认领/, "库照样落上");
-	assert.match(out, /没叫到人（dev 在忙）/, "忙不是失败，但要说清");
+	assert.match(out, /waiting：dev 在忙/, "忙时留下可恢复等待状态");
 	assert.equal(sent[0].requireIdle, true, "派工必须声明只要空闲的");
 });
 
