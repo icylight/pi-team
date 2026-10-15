@@ -182,7 +182,15 @@ test("声明齐全时，报告里每项都是「配置」来源，没有兜底�
 			group: {
 				name: "ipd",
 				flow: ".pi/flows/ipd.md",
-				roles: { owner: { card: ".pi/characters/owner.md", model: "test/model", thinkingLevel: "high" } },
+				roles: {
+					owner: {
+						card: ".pi/characters/owner.md",
+						model: "test/model",
+						thinkingLevel: "high",
+						canAssignRoles: true,
+						canStartSessions: true,
+					},
+				},
 			},
 		},
 		".pi/characters/owner.md": "我是 owner",
@@ -195,6 +203,8 @@ test("声明齐全时，报告里每项都是「配置」来源，没有兜底�
 			"identity:declared",
 			"roles:declared",
 			"role:declared",
+			"canAssignRoles:declared",
+			"canStartSessions:declared",
 			"model:declared",
 			"thinkingLevel:declared",
 			"flow:declared",

@@ -21,6 +21,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { SessionControl } from "./session-control.ts";
 
 /** 目录权限：消息正文可能带着项目内容，收口给本人可见 */
 const DIR_MODE = 0o700;
@@ -58,6 +59,14 @@ export interface Member {
 	role?: string;
 	/** 角色实例名，例如 dev、dev-2；用于释放认领槽位 */
 	roleSlot?: string;
+	/** 支持带确认的远程角色分配协议；缺失表示旧版。 */
+	roleAssignmentVersion?: 1;
+	newSessionVersion?: 1;
+	newSessionEpoch?: string;
+	/** 支持普通/紧急消息及有效交接消费协议。 */
+	messageProtocol?: 1;
+	/** 本会话已加载支持有效交接消费的台账扩展。 */
+	handoffConsumer?: 1;
 	/** 模型标识，形如 deepseek/deepseek-flash */
 	model: string;
 	pid: number;
@@ -74,6 +83,11 @@ export interface Member {
 /** 忙超过这个时长就当它卡住了：不再信任 busy，避免一次异常让该会话永远收不到消息 */
 export const BUSY_STALE_MS = 30 * 60_000;
 
+// AI(TAG): [角色调度] 控制消息由接收进程校验并执行，不把消息正文当授权。
+export type RoleControl =
+	| { kind: "assign-role"; role: string; expiresAt: number; expectedRole?: string; expectedName: string }
+	| { kind: "assign-role-result"; requestId: string; ok: boolean; detail: string };
+
 export interface PeerMessage {
 	id: string;
 	/** 发送方 key */
@@ -87,6 +101,9 @@ export interface PeerMessage {
 	/** 回复目标消息 id */
 	replyTo?: string;
 	text: string;
+	control?: RoleControl | SessionControl;
+	priority?: "normal" | "urgent";
+	handoff?: { id: string; lease: string };
 	ts: number;
 }
 

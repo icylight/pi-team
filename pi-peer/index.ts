@@ -32,6 +32,7 @@ import * as path from "node:path";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	type ExtensionContext,
 	type MessageRenderer,
 } from "@earendil-works/pi-coding-agent";
@@ -49,6 +50,8 @@ import {
 	resolveFlow,
 	resolveRoleCard,
 } from "./config.ts";
+import { hasPersistedHandoff } from "./handoff-persistence.ts";
+import { registerSessionControl, SESSION_TASK_ENTRY } from "./session-control.ts";
 import {
 	isBusy,
 	MAX_TEXT,
@@ -59,6 +62,7 @@ import {
 	PeerStore,
 	projectLabel,
 	type ResolveResult,
+	type RoleControl,
 } from "./store.ts";
 
 /** 项目级配置与「生效值从哪来」都在 config.ts，这里只留用法 */
@@ -93,19 +97,134 @@ let watcher: fs.FSWatcher | undefined;
 let draining = false;
 let roleCard: string | undefined;
 let flowDocument: string | undefined;
+let handleSessionControl: ((message: PeerMessage) => Promise<void>) | undefined;
+let handleControl: ((message: PeerMessage) => Promise<void>) | undefined;
+let persistenceTimer: NodeJS.Timeout | undefined;
+const bufferedHandoffs = new Map<
+	string,
+	{ handoff: NonNullable<PeerMessage["handoff"]>; woken: boolean; until: number }
+>();
 
 export default function (pi: ExtensionAPI) {
 	// 关掉时整个扩展不注册：工具、命令、心跳、收件箱监听都不起
-	// 判定用工厂期 cwd —— pi 全程不改进程工作目录，与 ctx.cwd 一致
+	// 启用开关在工厂期判定；调度权限按实际会话 cwd 每次读取。
 	const configPath = path.join(process.cwd(), CONFIG_DIR_NAME, CONFIG_FILE);
 	const loaded = loadProjectConfig(configPath);
 	if (process.env.PI_PEER_OFF === "1" || loaded.config.enabled === false) return;
 
 	api = pi;
+	let roleTransition: Promise<void> | undefined;
+	let peerCommandCount = 0;
+	const assignments = new Map<
+		string,
+		{
+			from: string;
+			finish: (ok: boolean, detail: string) => void;
+		}
+	>();
+	const currentConfig = () =>
+		loadProjectConfig(path.join(ctxRef?.cwd ?? process.cwd(), CONFIG_DIR_NAME, CONFIG_FILE)).config;
+	const canAssign = (role?: string) => {
+		if (!role) return false;
+		const config = currentConfig();
+		if (config.enabled === false) return false;
+		return (config.group?.roles?.[role]?.canAssignRoles ?? config.roles?.[role]?.canAssignRoles) === true;
+	};
+	const sessions = registerSessionControl(pi, {
+		get: () =>
+			store && self && ctxRef
+				? { store, member: self, ctx: ctxRef, roleChanging: !!roleTransition || peerCommandCount > 0 }
+				: undefined,
+		canStart: (role) => {
+			if (!role) return false;
+			const config = currentConfig();
+			return (
+				config.enabled !== false &&
+				(config.group?.roles?.[role]?.canStartSessions ?? config.roles?.[role]?.canStartSessions) === true
+			);
+		},
+		resolve: resolveTarget,
+		seed: (manager, member) => {
+			manager.appendCustomEntry(ROLE_ENTRY, { role: member.role ?? "", name: member.roleSlot ?? member.name });
+			manager.appendCustomEntry("peer-name", { name: member.name });
+		},
+	});
+	handleSessionControl = sessions.handle;
+	function peerCommand(handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>) {
+		return async (args: string, ctx: ExtensionCommandContext) => {
+			if (sessions.isPending()) {
+				ctx.ui.notify("已有远程会话切换请求，请稍后再操作角色或会话。", "warning");
+				return;
+			}
+			peerCommandCount++;
+			try {
+				await handler(args, ctx);
+			} finally {
+				peerCommandCount--;
+			}
+		};
+	}
+	function sendControl(target: Member, control: RoleControl): string {
+		if (!store || !self) throw new Error("pi-peer 未启用");
+		const msg: PeerMessage = {
+			id: newMessageId(),
+			from: self.key,
+			fromName: self.name,
+			fromModel: self.model,
+			to: target.key,
+			text: control.kind === "assign-role" ? `分配角色：${control.role}` : `角色分配结果：${control.detail}`,
+			ts: Date.now(),
+			control,
+		};
+		store.send(msg);
+		store.logSent(self.key, msg);
+		return msg.id;
+	}
+	handleControl = async (msg) => {
+		if (!store || !self || !ctxRef || msg.to !== self.key) return;
+		const control = msg.control;
+		if (control?.kind === "assign-role-result") {
+			const pending = assignments.get(control.requestId);
+			if (pending?.from === msg.from) pending.finish(control.ok === true, control.detail);
+			return;
+		}
+		if (control?.kind !== "assign-role") return;
+		const caller = store.listMembers().find((member) => member.key === msg.from);
+		// 同桶在线注册表是身份依据；同一 OS 用户可写文件，不作为进程隔离安全边界。
+		if (!caller || caller.key === self.key) return;
+		let detail: string;
+		let ok = false;
+		if (!canAssign(caller.role)) detail = "调用者当前角色没有 canAssignRoles 权限";
+		else if (!Number.isFinite(control.expiresAt) || control.expiresAt <= Date.now()) detail = "角色分配请求已过期";
+		else if (self.busy || !ctxRef.isIdle() || sessions.isPending() || peerCommandCount > 0)
+			detail = "目标会话在忙，未切换角色";
+		else if (self.role !== control.expectedRole || self.name !== control.expectedName)
+			detail = "目标角色已变化，请重新查询后分配";
+		else if (typeof control.role !== "string" || !isValidRoleName(control.role)) detail = "角色名非法";
+		else if (!resolveRoleCard(ctxRef.cwd, loaded.config, control.role, CONFIG_DIR_NAME).path)
+			detail = "目标角色卡不存在";
+		else {
+			try {
+				roleTransition = setRole(control.role, ctxRef);
+				await roleTransition;
+				ok = self?.role === control.role;
+				detail = ok ? `已切换角色：${self.role}，实例名：${self.name}，当前模型：${self.model}` : "切换角色失败";
+			} catch (error) {
+				detail = `切换角色失败：${(error as Error).message}`;
+			} finally {
+				roleTransition = undefined;
+			}
+		}
+		sendControl(caller, { kind: "assign-role-result", requestId: msg.id, ok, detail });
+	};
 
 	/** 生效配置的报告：启动提示与 /peer-config 共用，保证「报的」就是「跑的」 */
 	function configReport(cwd: string, role?: string) {
-		return describeConfig(loaded, { cwd, role, dirName: CONFIG_DIR_NAME });
+		return describeConfig(loadProjectConfig(path.join(cwd, CONFIG_DIR_NAME, CONFIG_FILE)), {
+			cwd,
+			role,
+			dirName: CONFIG_DIR_NAME,
+		});
 	}
 
 	/** 应用角色的默认模型与思考等级；失败保留会话设置并提示，返回是否全部生效与实际模型 */
@@ -143,6 +262,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		ctxRef = ctx;
+		sessions.dispose();
+		for (const pending of assignments.values()) pending.finish(false, "会话已切换，分配结果未确认");
 		teardown();
 
 		const root = process.env.PI_PEER_ROOT?.trim() || path.join(os.homedir(), CONFIG_DIR_NAME, "peers");
@@ -158,7 +279,11 @@ export default function (pi: ExtensionAPI) {
 
 		const key = newSessionKey();
 		const restoredRole = restoreRole(ctx);
-		const requestedRole = process.env.PI_PEER_ROLE?.trim() || restoredRole?.role;
+		// 远程新会话保留目标当前角色，优先于进程最初启动时指定的角色。
+		const remoteSession = ctx.sessionManager
+			.getEntries()
+			.some((entry) => entry.type === "custom" && entry.customType === SESSION_TASK_ENTRY);
+		const requestedRole = remoteSession ? restoredRole?.role : process.env.PI_PEER_ROLE?.trim() || restoredRole?.role;
 		const role = requestedRole && isValidRoleName(requestedRole) ? requestedRole : undefined;
 		const roleCardPath = role ? resolveRoleCard(ctx.cwd, loaded.config, role, CONFIG_DIR_NAME).path : undefined;
 		if (requestedRole && !role && ctx.hasUI) {
@@ -212,6 +337,11 @@ export default function (pi: ExtensionAPI) {
 			project,
 			role: effectiveRole,
 			roleSlot,
+			roleAssignmentVersion: 1,
+			newSessionVersion: 1,
+			newSessionEpoch: newMessageId(),
+			busy: ctx.isIdle?.() === false,
+			messageProtocol: 1,
 			model: activeModel ? `${activeModel.provider}/${activeModel.id}` : "unknown",
 			pid: process.pid,
 			cwd: ctx.cwd,
@@ -264,6 +394,13 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	pi.on("message_end", (event) => {
+		if (event.message.role !== "custom") return;
+		const details = event.message.details as { handoff?: PeerMessage["handoff"] } | undefined;
+		if (!details?.handoff) return;
+		confirmHandoff(details.handoff);
+	});
+
 	pi.on("model_select", (event) => {
 		if (!store || !self) return;
 		self.model = `${event.model.provider}/${event.model.id}`;
@@ -295,10 +432,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		sessions.dispose();
+		for (const pending of assignments.values()) pending.finish(false, "会话已关闭，分配结果未确认");
 		teardown();
 	});
 
-	pi.on("before_agent_start", (event) => {
+	pi.on("before_agent_start", async (event) => {
+		// 空闲校验后若人工恰好发起新一轮，先等角色变更完成，再构造该轮提示。
+		if (roleTransition) await roleTransition;
 		const sections = event.systemPromptOptions.sections;
 		if (roleCard) {
 			sections.peer_role = `当前加载的 peer 角色卡（角色：${self?.role ?? "未知"}）：\n\n${roleCard}`;
@@ -325,7 +466,12 @@ export default function (pi: ExtensionAPI) {
 	function deliverTo(
 		res: Extract<ResolveResult, { ok: true }>,
 		body: string,
-		opts: { replyTo?: string; thread?: string } = {},
+		opts: {
+			replyTo?: string;
+			thread?: string;
+			priority?: "normal" | "urgent";
+			handoff?: PeerMessage["handoff"];
+		} = {},
 	): PeerMessage | undefined {
 		if (!store || !self) return undefined;
 		const parent = opts.replyTo ? store.findMessage(self.key, opts.replyTo) : undefined;
@@ -339,6 +485,8 @@ export default function (pi: ExtensionAPI) {
 			thread: opts.thread ?? parent?.thread ?? (parent ? parent.id : undefined) ?? id,
 			replyTo: parent?.id,
 			text: body.slice(0, MAX_TEXT),
+			priority: opts.priority ?? "normal",
+			handoff: opts.handoff,
 			ts: Date.now(),
 		};
 		store.send(msg, res.bucket);
@@ -456,18 +604,74 @@ export default function (pi: ExtensionAPI) {
 			text: Type.String({ description: "消息正文，说清楚你要什么" }),
 			replyTo: Type.Optional(Type.String({ description: "回复某条消息时填它的 id，会自动继承会话线索" })),
 			thread: Type.Optional(Type.String({ description: "显式指定会话线索 id" })),
+			priority: Type.Optional(Type.String({ description: "normal（默认，不打断）或 urgent（显式 steer 打断）" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!store || !self) return text("pi-peer 未启用（未注册成功）");
 
+			if (params.priority !== undefined && params.priority !== "normal" && params.priority !== "urgent")
+				throw new Error("priority 只接受 normal 或 urgent");
+			const priority = params.priority ?? "normal";
 			const res = resolveTarget(params.to);
 			if (!res.ok) return text(resolveHint(params.to, res));
+			if (priority === "normal" && res.member.messageProtocol !== 1)
+				throw new Error("目标版本不支持普通消息不打断，请先重载目标扩展");
 
-			const msg = deliverTo(res, params.text, { replyTo: params.replyTo, thread: params.thread });
+			const msg = deliverTo(res, params.text, { replyTo: params.replyTo, thread: params.thread, priority });
 			if (!msg) return text("pi-peer 未启用（未注册成功）");
 			ctx?.ui.notify(`→ ${res.member.name}: ${firstLine(msg.text)}`, "info");
 
-			return text(`已发给 ${res.member.name}（${res.member.model}）｜id=${msg.id}｜对方会被唤醒处理`);
+			return text(
+				`已写入 ${res.member.name} 的收件箱｜id=${msg.id}｜${priority === "urgent" ? "urgent / steer，允许打断" : "normal / followUp，不打断当前轮"}；写入收件箱不代表已处理`,
+			);
+		},
+	});
+
+	pi.registerTool({
+		name: "peer_assign_role",
+		label: "Peer Assign Role",
+		description:
+			"给同项目其他空闲在线 pi 会话设定角色；调用者当前角色须配置 canAssignRoles: true。等待目标确认，不新建进程，也不清空目标上下文。",
+		parameters: Type.Object({
+			to: Type.String({ description: "同项目目标会话的名称、id 或 pid，先用 peer_list 查看" }),
+			role: Type.String({ description: "要分配的角色名，须有有效角色卡" }),
+		}),
+		async execute(_id, params, signal) {
+			if (!store || !self) throw new Error("pi-peer 未启用");
+			if (!canAssign(self.role)) throw new Error("当前角色没有 canAssignRoles 权限");
+			if (
+				!isValidRoleName(params.role) ||
+				!resolveRoleCard(self.cwd, loaded.config, params.role, CONFIG_DIR_NAME).path
+			) {
+				throw new Error("角色名非法或角色卡不存在");
+			}
+			const target = resolveTarget(params.to);
+			if (!target.ok) throw new Error(resolveHint(params.to, target));
+			if (target.bucket !== store.dir || target.member.key === self.key)
+				throw new Error("只能给同项目的其他会话分配角色");
+			if (target.member.roleAssignmentVersion !== 1) throw new Error("目标版本不支持角色分配，请先重载目标扩展");
+			if (isBusy(target.member)) throw new Error("目标会话在忙，未发送角色分配请求");
+			if (signal?.aborted) throw new Error("已取消，未发送请求");
+			return new Promise<ReturnType<typeof text>>((resolve, reject) => {
+				const requestId = sendControl(target.member, {
+					kind: "assign-role",
+					role: params.role,
+					expiresAt: Date.now() + 8_000,
+					expectedRole: target.member.role,
+					expectedName: target.member.name,
+				});
+				const finish = (ok: boolean, detail: string) => {
+					clearTimeout(timer);
+					signal?.removeEventListener("abort", abort);
+					assignments.delete(requestId);
+					if (ok) resolve(text(detail));
+					else reject(new Error(detail));
+				};
+				const abort = () => finish(false, "等待已取消，目标可能已执行；请用 peer_list 核实，勿盲目重试");
+				const timer = setTimeout(() => finish(false, "角色分配确认超时，结果未知；请用 peer_list 核实"), 10_000);
+				assignments.set(requestId, { from: target.member.key, finish });
+				signal?.addEventListener("abort", abort, { once: true });
+			});
 		},
 	});
 
@@ -511,8 +715,24 @@ export default function (pi: ExtensionAPI) {
 		pi.events.emit("peer:whoami:result", { id: request.id, name: self?.name ?? "" });
 	});
 
+	pi.events.on("peer:handoff-support", (data) => {
+		if (!store || !self) return;
+		const request = data as { version?: number } | undefined;
+		self.handoffConsumer = request?.version === 1 ? 1 : undefined;
+		store.register(self);
+	});
+
 	pi.events.on(WAKE_CHANNEL, (data) => {
-		const request = data as { id?: string; targets?: string[]; text?: string; requireIdle?: boolean } | undefined;
+		const request = data as
+			| {
+					id?: string;
+					targets?: string[];
+					text?: string;
+					requireIdle?: boolean;
+					priority?: "normal" | "urgent";
+					handoff?: PeerMessage["handoff"];
+			  }
+			| undefined;
 		if (!request?.id) return;
 		const targets = request.targets ?? [];
 		const reply = (ok: boolean, detail: string, to?: string) =>
@@ -521,15 +741,34 @@ export default function (pi: ExtensionAPI) {
 		if (!store || !self) return reply(false, "该会话没启用 pi-peer");
 		const skipped: string[] = [];
 		for (const target of targets) {
-			const resolved = request.requireIdle ? store.resolveIdle(target, self.key) : resolveTarget(target);
+			const resolved =
+				request.handoff && target === self.name
+					? { ok: true as const, member: self, bucket: store.dir, live: true }
+					: request.requireIdle
+						? store.resolveIdle(target, self.key)
+						: resolveTarget(target);
 			if (!resolved.ok) {
 				// 在忙与离线要分开报：前者等一等就好，后者得换人
 				if (resolved.reason === "busy") skipped.push(`${resolved.candidates[0]?.name ?? target} 在忙`);
 				continue;
 			}
-			if (resolved.member.key === self.key) continue;
-			const message = deliverTo(resolved, request.text ?? "");
-			if (message) return reply(true, "已投递", resolved.member.name);
+			if (resolved.member.key === self.key && !request.handoff) continue;
+			if (request.handoff && path.resolve(resolved.member.cwd) !== path.resolve(self.cwd)) {
+				skipped.push(`${resolved.member.name} 属于其他项目，拒绝工单交接`);
+				continue;
+			}
+			if (
+				request.handoff &&
+				(isBusy(resolved.member) || resolved.member.messageProtocol !== 1 || resolved.member.handoffConsumer !== 1)
+			) {
+				skipped.push(`${resolved.member.name} 在忙或不支持交接协议`);
+				continue;
+			}
+			const message = deliverTo(resolved, request.text ?? "", {
+				priority: request.priority ?? "normal",
+				handoff: request.handoff,
+			});
+			if (message) return reply(true, "已写入收件箱，尚未确认注入", resolved.member.name);
 		}
 		if (skipped.length) return reply(false, skipped.join("、"));
 		return reply(false, targets.length ? `候选都不在线：${targets.join("、")}` : "没有候选");
@@ -588,7 +827,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("peer-role", {
 		description: "查看或中途切换本会话角色（不带参弹列表选；用法：/peer-role [角色|none]）",
-		handler: async (args, ctx) => {
+		handler: peerCommand(async (args, ctx) => {
 			if (!store || !self) {
 				ctx.ui.notify("pi-peer 未启用", "warning");
 				return;
@@ -619,7 +858,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			await setRole(arg, ctx);
-		},
+		}),
 	});
 
 	/** 中途领取角色：换角色卡、认领实例名槽位、应用角色默认设置，并记入会话供重启恢复 */
@@ -641,7 +880,10 @@ export default function (pi: ExtensionAPI) {
 			);
 			return;
 		}
-		if (self.role && self.roleSlot) store.releaseRoleName(self.role, self.roleSlot, self.key);
+		const activeStore = store;
+		const activeMember = self;
+		const oldRole = self.role;
+		const oldSlot = self.roleSlot;
 		let slot: string;
 		try {
 			slot = store.claimRoleName(role, self.key, process.pid);
@@ -650,6 +892,11 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		const res = await applyRoleDefaults(role, ctx);
+		if (store !== activeStore || self !== activeMember) {
+			activeStore.releaseRoleName(role, slot, activeMember.key);
+			throw new Error("目标会话已切换，角色变更未应用");
+		}
+		if (oldRole && oldSlot) store.releaseRoleName(oldRole, oldSlot, self.key);
 		if (res.applied) pi.appendEntry(ROLE_DEFAULTS_ENTRY, { role });
 		roleCard = readOptionalFile(cardPath);
 		self.role = role;
@@ -658,6 +905,7 @@ export default function (pi: ExtensionAPI) {
 		if (res.model) self.model = `${res.model.provider}/${res.model.id}`;
 		pi.appendEntry(ROLE_ENTRY, { role, name: slot });
 		store.register(self);
+		pi.events.emit("peer:identity-changed", { name: self.name, role: self.role });
 		refreshStatus();
 		ctx.ui.notify(`已切换角色：${role}，实例名：${slot}`, "info");
 	}
@@ -679,6 +927,7 @@ export default function (pi: ExtensionAPI) {
 		// role 记空串而不是删条目：restoreRole 取最后一条，空串表示「明确取消过」
 		pi.appendEntry(ROLE_ENTRY, { role: "", name: fallback });
 		store.register(self);
+		pi.events.emit("peer:identity-changed", { name: self.name });
 		refreshStatus();
 		ctx.ui.notify(`已取消角色，名称回到 ${fallback}`, "info");
 	}
@@ -714,7 +963,8 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("pi-peer 未启用", "warning");
 				return;
 			}
-			const m = /^(\S+)\s+([\s\S]+)$/.exec(args.trim());
+			const urgent = args.trim().startsWith("--urgent ");
+			const m = /^(\S+)\s+([\s\S]+)$/.exec(urgent ? args.trim().slice("--urgent ".length) : args.trim());
 			if (!m) {
 				ctx.ui.notify("用法：/peer-send <目标|项目/目标> <正文>", "warning");
 				return;
@@ -724,14 +974,21 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(resolveHint(m[1], res), "warning");
 				return;
 			}
-			deliverTo(res, m[2]);
-			ctx.ui.notify(`→ ${res.member.name}（已投递）`, "info");
+			if (!urgent && res.member.messageProtocol !== 1) {
+				ctx.ui.notify("目标版本不支持普通消息不打断，请先重载目标扩展", "warning");
+				return;
+			}
+			deliverTo(res, m[2], { priority: urgent ? "urgent" : "normal" });
+			ctx.ui.notify(
+				`→ ${res.member.name}（已写入收件箱，${urgent ? "urgent / steer" : "normal / followUp"}）`,
+				"info",
+			);
 		},
 	});
 
 	pi.registerCommand("peer-new", {
 		description: "新建会话并领取角色（用法：/peer-new [--role 角色]）",
-		handler: async (args, ctx) => {
+		handler: peerCommand(async (args, ctx) => {
 			if (!store || !self) {
 				ctx.ui.notify("pi-peer 未启用", "warning");
 				return;
@@ -792,7 +1049,7 @@ export default function (pi: ExtensionAPI) {
 				},
 			});
 			if (result.cancelled && ctx.hasUI) ctx.ui.notify("新建会话被取消", "warning");
-		},
+		}),
 	});
 }
 
@@ -897,17 +1154,35 @@ function scheduleDrain(): void {
 	if (drainTimer) return;
 	drainTimer = setTimeout(() => {
 		drainTimer = undefined;
-		drainAndDeliver();
+		void drainAndDeliver();
 	}, DRAIN_DEBOUNCE_MS);
 	drainTimer.unref?.();
 }
 
-function drainAndDeliver(): void {
+async function drainAndDeliver(): Promise<void> {
 	if (draining || !store || !self) return;
 	draining = true;
+	const activeStore = store;
+	const activeMember = self;
 	try {
-		for (const msg of store.drain(self.key)) {
-			deliver(msg);
+		for (const msg of activeStore.drain(activeMember.key)) {
+			if (store !== activeStore || self !== activeMember) break;
+			if (msg.control) {
+				await handleSessionControl?.(msg);
+				await handleControl?.(msg);
+			} else if (msg.handoff) {
+				const persisted = diskHasHandoff(msg.handoff.id);
+				if (self.busy || ctxRef?.isIdle?.() === false) continue;
+				api?.events.emit("work-orders:consume-handoff", {
+					...msg.handoff,
+					alreadyPersisted: persisted === true,
+					identities: [self.name, self.role].filter(Boolean),
+					deliver: () => {
+						if (persisted) confirmHandoff(msg.handoff!);
+						else if (!deliver(msg)) throw new Error("会话注入失败");
+					},
+				});
+			} else deliver(msg);
 		}
 	} catch (err) {
 		ctxRef?.ui.notify(`pi-peer 收信失败：${(err as Error).message}`, "error");
@@ -916,11 +1191,85 @@ function drainAndDeliver(): void {
 	}
 }
 
-/**
- * 消息类型名 = 来源名，TUI 气泡与 session tree 都按它显示「谁发来的」。
- * 来源是收信时才出现的，所以按需注册；注册表是 Map，重复注册只是覆盖，
- * 不另设已注册集合——扩展重载后新实例的表是空的，缓存会把来源永久挡在外面。
- */
+function handoffBranch() {
+	const manager = ctxRef?.sessionManager;
+	return manager?.getBranch?.() ?? manager?.getEntries() ?? [];
+}
+function diskHasHandoff(id: string): boolean {
+	return hasPersistedHandoff(ctxRef?.sessionManager.getSessionFile(), handoffBranch(), id);
+}
+function memoryHasHandoff(id: string): boolean {
+	return handoffBranch().some(
+		(entry) =>
+			entry.type === "custom_message" &&
+			(entry.details as { handoff?: { id?: string } } | undefined)?.handoff?.id === id,
+	);
+}
+function wakeHandoff(): () => void {
+	const receiver = api;
+	const key = self?.key;
+	return () =>
+		queueMicrotask(() => {
+			if (!key || self?.key !== key) return;
+			try {
+				receiver?.sendUserMessage("请处理刚收到的工单交接，先用 orders_show 核实当前状态再行动。", {
+					deliverAs: "followUp",
+				});
+			} catch {
+				ctxRef?.ui.notify("工单交接唤醒失败，请核实通知记录并人工处理。", "warning");
+			}
+		});
+}
+function schedulePersistenceCheck(): void {
+	if (persistenceTimer || !bufferedHandoffs.size) return;
+	persistenceTimer = setTimeout(() => {
+		persistenceTimer = undefined;
+		for (const [id, pending] of bufferedHandoffs) {
+			if (Date.now() >= pending.until) {
+				bufferedHandoffs.delete(id);
+				continue;
+			}
+			if (diskHasHandoff(id)) {
+				try {
+					api?.events.emit("work-orders:handoff-injected", {
+						...pending.handoff,
+						wake: pending.woken ? undefined : wakeHandoff(),
+					});
+					bufferedHandoffs.delete(id);
+				} catch {
+					/* 确认端不可用时保留等待，由有效期和耐久租约限制重试。 */
+				}
+			} else if (!pending.woken && memoryHasHandoff(id)) {
+				pending.woken = true;
+				wakeHandoff()();
+			}
+		}
+		schedulePersistenceCheck();
+	}, 100);
+	persistenceTimer.unref?.();
+}
+function confirmHandoff(handoff: NonNullable<PeerMessage["handoff"]>): void {
+	const previous = bufferedHandoffs.get(handoff.id);
+	if (diskHasHandoff(handoff.id)) {
+		bufferedHandoffs.delete(handoff.id);
+		api?.events.emit("work-orders:handoff-injected", {
+			...handoff,
+			wake: previous?.woken ? undefined : wakeHandoff(),
+		});
+		return;
+	}
+	if (!ctxRef?.sessionManager.getSessionFile()) return;
+	// 新空白会话的 custom entry 可能只在内存；首次用户消息落盘后才能补确认。
+	const pending = { handoff, woken: previous?.woken ?? false, until: Date.now() + 30_000 };
+	bufferedHandoffs.set(handoff.id, pending);
+	if (!pending.woken && memoryHasHandoff(handoff.id)) {
+		pending.woken = true;
+		wakeHandoff()();
+	}
+	schedulePersistenceCheck();
+}
+
+/** 按来源名注册渲染器，使会话重放也能识别消息来源。 */
 function ensureMessageRenderer(source: string): void {
 	api?.registerMessageRenderer(source, renderPeerMessage);
 }
@@ -941,8 +1290,8 @@ const renderPeerMessage: MessageRenderer = (message, options, theme) => {
 	return new Text(`${head}\n${body}`, options.outputPad, 0);
 };
 
-function deliver(msg: PeerMessage): void {
-	if (!api) return;
+function deliver(msg: PeerMessage): boolean {
+	if (!api) return false;
 
 	// 首行给模型认来源（custom 消息转成 LLM 输入时是普通 user 文本，没有额外标记）；
 	// 长度压到一行，免得 session tree 里正文被元信息挤掉。
@@ -967,18 +1316,24 @@ function deliver(msg: PeerMessage): void {
 					fromName: msg.fromName,
 					fromModel: msg.fromModel,
 					thread: msg.thread,
+					handoff: msg.handoff,
 				},
 			},
-			// 忙时用 steer：插在当前 turn 的工具调用之后，不等整个 run 结束（followUp 要等）
-			// 空闲时 steer/followUp 无差别，都走 triggerTurn 立即起一轮
-			{ triggerTurn: true, deliverAs: "steer" },
+			// 耐久交接以当前分支 entry 的真实落盘记录确认；空白会话须先触发首次用户消息。
+			{ triggerTurn: !msg.handoff, deliverAs: msg.priority === "urgent" ? "steer" : "followUp" },
 		);
+		if (msg.handoff) confirmHandoff(msg.handoff);
+		return true;
 	} catch (err) {
 		ctxRef?.ui.notify(`pi-peer 注入消息失败：${(err as Error).message}`, "error");
+		return false;
 	}
 }
 
 function teardown(): void {
+	if (persistenceTimer) clearTimeout(persistenceTimer);
+	persistenceTimer = undefined;
+	bufferedHandoffs.clear();
 	if (heartbeatTimer) clearInterval(heartbeatTimer);
 	if (pollTimer) clearInterval(pollTimer);
 	if (drainTimer) clearTimeout(drainTimer);

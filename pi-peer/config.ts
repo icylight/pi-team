@@ -30,6 +30,8 @@ export interface RoleConfig {
 	card?: string;
 	model?: string;
 	thinkingLevel?: (typeof THINKING_LEVELS)[number];
+	canAssignRoles?: boolean;
+	canStartSessions?: boolean;
 }
 
 export interface ProjectConfig {
@@ -146,6 +148,12 @@ function parseRoles(raw: unknown, field: string, problems: string[]): Record<str
 					parsed.thinkingLevel = value.thinkingLevel as RoleConfig["thinkingLevel"];
 				} else problems.push(`${field}.${role}.thinkingLevel 要写 ${THINKING_LEVELS.join(" / ")}，这一项被忽略`);
 			}
+			for (const key of ["canAssignRoles", "canStartSessions"] as const) {
+				if (value[key] !== undefined) {
+					if (typeof value[key] === "boolean") parsed[key] = value[key];
+					else problems.push(`${field}.${role}.${key} 要写 true 或 false，这一项被忽略`);
+				}
+			}
 			roles[role] = parsed;
 		} else {
 			problems.push(`${field}.${role} 要写角色卡路径字符串或 { card: 路径 }，这一项被忽略`);
@@ -164,7 +172,7 @@ export type Origin =
 
 export interface ConfigItem {
 	/** identity=项目标签，role=本次生效的角色卡，roles=可用角色名单，flow=流程文档 */
-	key: "identity" | "role" | "roles" | "flow" | "model" | "thinkingLevel";
+	key: "identity" | "role" | "roles" | "flow" | "model" | "thinkingLevel" | "canAssignRoles" | "canStartSessions";
 	label: string;
 	value: string;
 	origin: Origin;
@@ -220,6 +228,22 @@ export function describeConfig(
 			value: card.path ? path.relative(options.cwd, card.path) || card.path : "（没找到，角色不加载）",
 			origin: card.origin,
 		});
+		for (const key of ["canAssignRoles", "canStartSessions"] as const) {
+			const groupPermission = loaded.config.group?.roles?.[options.role]?.[key];
+			const permission = groupPermission ?? loaded.config.roles?.[options.role]?.[key];
+			items.push({
+				key,
+				label: key === "canAssignRoles" ? "分配同项目角色权限" : "为同项目其他空闲会话新建会话权限",
+				value: permission === true ? "允许" : "不允许",
+				origin:
+					permission !== undefined
+						? {
+								kind: "declared",
+								detail: `${groupPermission !== undefined ? "group.roles" : "roles"}.${options.role}.${key}`,
+							}
+						: { kind: "absent", detail: "未配置，默认不允许" },
+			});
+		}
 		for (const key of ["model", "thinkingLevel"] as const) {
 			const groupValue = loaded.config.group?.roles?.[options.role]?.[key];
 			const value = groupValue ?? loaded.config.roles?.[options.role]?.[key];

@@ -55,6 +55,8 @@ description: 编辑 pi-peer 的项目配置——`.pi/peer.json`（启用开关�
 - `group.roles.<角色>.card`：角色卡路径（相对本项目）；也收字符串简写 `"owner": ".pi/characters/owner.md"`
 - `group.roles.<角色>.model`：完整 `provider/model-id`
 - `group.roles.<角色>.thinkingLevel`：`off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`
+- `group.roles.<角色>.canAssignRoles`：布尔值，默认 `false`；设为 `true` 后该角色可用 `peer_assign_role` 给同项目其他空闲在线会话分配角色（包括具备调度权限的角色）。授权范围由用户决定，不能因派工自行授予
+- `group.roles.<角色>.canStartSessions`：布尔值，默认 `false`；用户明确授权后可为同项目其他空闲 agent 新建会话并派发任务，与 `canAssignRoles` 独立；行为与失败核实见包 README「让已有 agent 新建会话」
 - `group.flow`：流程文档路径
 - `workOrders.followRole`：工单定时提醒跟的角色名（**由 pi-work-orders 读，不由 pi-peer 读**；空 = 不开）。同段还收 `intervalMinutes` / `staleMinutes` / `repeatMinutes`（正数）
 
@@ -77,4 +79,4 @@ description: 编辑 pi-peer 的项目配置——`.pi/peer.json`（启用开关�
 
 ## 生效语义
 
-写入后告知用户——`peer.json`、角色卡、流程都在会话加载时读，改完需 `/reload` 或重开会话；`enabled: false` 的项目里本扩展整个不注册，要恢复先改回文件并 `/reload`。本 skill 不做文件监听或热更新。
+写入后告知用户——`canAssignRoles` 与 `canStartSessions` 每次调用时读取，修改权限无需重载；其他 `peer.json` 字段、角色卡与流程都在会话加载时读，改完需 `/reload` 或重开会话；`enabled: false` 的项目里本扩展整个不注册，要恢复先改回文件并 `/reload`。本 skill 不做文件监听或热更新。

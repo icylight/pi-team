@@ -264,6 +264,69 @@ test("候选都不在线：回失败，且不写进任何收件箱", async () =>
 	}
 });
 
+test("普通消息拒绝旧版目标，紧急消息显式保留兼容通道", async () => {
+	const { cwd, peerRoot, store } = tmpPair();
+	const peer = mountPeer(cwd, peerRoot);
+	try {
+		await peer.handlers.get("session_start")({}, ctxFor(cwd));
+		liveMember(peerRoot, cwd, "9000-aaaa", "dev");
+		const tool = peer.tools.get("peer_send");
+		await assert.rejects(tool.execute("call", { to: "dev", text: "normal" }), /目标版本不支持/);
+		await assert.rejects(tool.execute("call", { to: "dev", text: "bad", priority: "invalid" }), /priority/);
+		assert.equal(store.drain("9000-aaaa").length, 0);
+		const result = await tool.execute("call", { to: "dev", text: "urgent", priority: "urgent" });
+		assert.match(result.content[0].text, /urgent \/ steer/);
+		assert.equal(store.drain("9000-aaaa")[0].priority, "urgent");
+	} finally {
+		peer.restore();
+	}
+});
+
+test("缺少新版台账消费端时不把耐久交接降级成普通正文", async () => {
+	const { cwd, peerRoot, store } = tmpPair();
+	const peer = mountPeer(cwd, peerRoot);
+	try {
+		await peer.handlers.get("session_start")({}, ctxFor(cwd));
+		liveMember(peerRoot, cwd, "9000-aaaa", "dev", { messageProtocol: 1 });
+		const results: any[] = [];
+		peer.channels.set("peer:deliver:result", [(data: unknown) => results.push(data)]);
+		for (const fn of peer.channels.get("peer:deliver") ?? [])
+			fn({
+				id: "req",
+				targets: ["dev"],
+				text: "handoff",
+				priority: "normal",
+				handoff: { id: "phase", lease: "lease" },
+			});
+		assert.equal(results[0].ok, false);
+		assert.match(results[0].detail, /不支持/);
+		assert.equal(store.drain("9000-aaaa").length, 0);
+	} finally {
+		peer.restore();
+	}
+});
+
+test("耐久交接拒绝跨项目目标，不从来信选择外项目台账", async () => {
+	const { cwd, peerRoot } = tmpPair();
+	const peer = mountPeer(cwd, peerRoot);
+	try {
+		await peer.handlers.get("session_start")({}, ctxFor(cwd));
+		const other = liveMember(peerRoot, path.join(path.dirname(cwd), "other-project"), "9000-aaaa", "qa", {
+			messageProtocol: 1,
+			handoffConsumer: 1,
+		});
+		const results: any[] = [];
+		peer.channels.set("peer:deliver:result", [(data: unknown) => results.push(data)]);
+		for (const fn of peer.channels.get("peer:deliver") ?? [])
+			fn({ id: "req", targets: ["other-project/qa"], text: "handoff", handoff: { id: "phase", lease: "lease" } });
+		assert.equal(results[0].ok, false);
+		assert.match(results[0].detail, /其他项目/);
+		assert.equal(other.drain("9000-aaaa").length, 0);
+	} finally {
+		peer.restore();
+	}
+});
+
 test("peer:whoami 回当前会话的名字", async () => {
 	const { cwd, peerRoot } = tmpPair();
 	const peer = mountPeer(cwd, peerRoot);
