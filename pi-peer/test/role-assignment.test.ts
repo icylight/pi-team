@@ -147,7 +147,7 @@ test("配置权限只认布尔值，group false 覆盖简写 true，报告默认
 	);
 });
 
-test("接收端校验授权，应用角色卡、默认模型和思考强度，持久化且不唤醒模型", async () => {
+test("接收端校验授权，换角色卡、保持目标当前模型与思考强度，持久化且不唤醒模型", async () => {
 	const h = harness({
 		roles: { owner: { canAssignRoles: true }, dev: { model: "target/model", thinkingLevel: "high" } },
 	});
@@ -157,14 +157,18 @@ test("接收端校验授权，应用角色卡、默认模型和思考强度，�
 		const result = await receiveResult(h, id);
 		assert.equal(result?.kind === "assign-role-result" && result.ok, true);
 		assert.equal(h.me().role, "dev");
-		assert.deepEqual(h.calls, ["model:target/model", "thinking:high"]);
+		assert.deepEqual(h.calls, []);
+		assert.equal(h.me().model, "original/model");
+		assert.match(result?.kind === "assign-role-result" ? result.detail : "", /当前模型：original\/model/);
 		assert.ok(h.entries.some((e) => e.customType === "peer-role" && e.data.role === "dev"));
 		const sections: Record<string, string> = {};
 		h.handlers.get("before_agent_start")!({ systemPromptOptions: { sections } }, h.ctx);
 		assert.match(sections.peer_role, /dev card/);
 		assert.equal(h.injected.length, 0);
+		// 重启不补套用角色默认模型：分配时记下的标记挡住了初始化
 		await h.start();
 		assert.equal(h.me().role, "dev");
+		assert.deepEqual(h.calls, []);
 	} finally {
 		h.stop();
 	}
@@ -293,32 +297,6 @@ test("确认超时报结果未知，不把投递成功当角色切换成功", as
 			h.tools.get("peer_assign_role").execute("call", { to: "caller", role: "dev" }),
 			/确认超时，结果未知/,
 		);
-	} finally {
-		h.stop();
-	}
-});
-
-test("远程切换默认模型期间新一轮等切换完成再注入角色卡", async () => {
-	const h = harness({ roles: { owner: { canAssignRoles: true }, dev: { model: "target/model" } } });
-	let release!: () => void;
-	h.pi.setModel = async () => {
-		await new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		return true;
-	};
-	try {
-		await h.start();
-		const id = h.request();
-		await waitFor(() => release);
-		const sections: Record<string, string> = {};
-		const prompt = h.handlers.get("before_agent_start")!({ systemPromptOptions: { sections } }, h.ctx);
-		assert.equal(sections.peer_role, undefined);
-		release();
-		await prompt;
-		assert.match(sections.peer_role, /dev card/);
-		const result = await receiveResult(h, id);
-		assert.equal(result?.kind === "assign-role-result" && result.ok, true);
 	} finally {
 		h.stop();
 	}

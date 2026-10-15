@@ -215,7 +215,7 @@ export default function (pi: ExtensionAPI) {
 			detail = "目标角色卡不存在";
 		else {
 			try {
-				roleTransition = setRole(control.role, ctxRef);
+				roleTransition = setRole(control.role, ctxRef, { applyRoleDefaults: false });
 				await roleTransition;
 				ok = self?.role === control.role;
 				detail = ok ? `已切换角色：${self.role}，实例名：${self.name}，当前模型：${self.model}` : "切换角色失败";
@@ -663,7 +663,7 @@ export default function (pi: ExtensionAPI) {
 		name: "peer_assign_role",
 		label: "Peer Assign Role",
 		description:
-			"给同项目其他空闲在线 pi 会话设定角色；调用者当前角色须配置 canAssignRoles: true。等待目标确认，不新建进程，也不清空目标上下文。",
+			"给同项目其他空闲在线 pi 会话设定角色；调用者当前角色须配置 canAssignRoles: true。等待目标确认，不新建进程，也不清空目标上下文，不改目标的模型与思考强度。",
 		parameters: Type.Object({
 			to: Type.String({ description: "同项目目标会话的名称、id 或 pid，先用 peer_list 查看" }),
 			role: Type.String({ description: "要分配的角色名，须有有效角色卡" }),
@@ -893,8 +893,12 @@ export default function (pi: ExtensionAPI) {
 		}),
 	});
 
-	/** 中途领取角色：换角色卡、认领实例名槽位、应用角色默认设置，并记入会话供重启恢复 */
-	async function setRole(role: string, ctx: ExtensionContext): Promise<void> {
+	/** 中途领取角色：换角色卡、认领实例名槽位，按需套用角色默认设置；记入会话供重启恢复 */
+	async function setRole(
+		role: string,
+		ctx: ExtensionContext,
+		options: { applyRoleDefaults?: boolean } = {},
+	): Promise<void> {
 		if (!store || !self) return;
 		if (!isValidRoleName(role)) {
 			ctx.ui.notify("角色名只能包含字母、数字、下划线和连字符，且必须以字母开头", "warning");
@@ -923,18 +927,23 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify((error as Error).message, "warning");
 			return;
 		}
-		const res = await applyDefaults(roleDefaults(role), ctx, `角色 ${role} 默认模型`);
+		// 远程分配角色只换身份：调度者不该顺手改目标的模型与思考强度
+		const res =
+			options.applyRoleDefaults === false
+				? undefined
+				: await applyDefaults(roleDefaults(role), ctx, `角色 ${role} 默认模型`);
 		if (store !== activeStore || self !== activeMember) {
 			activeStore.releaseRoleName(role, slot, activeMember.key);
 			throw new Error("目标会话已切换，角色变更未应用");
 		}
 		if (oldRole && oldSlot) store.releaseRoleName(oldRole, oldSlot, self.key);
-		if (res.applied) pi.appendEntry(ROLE_DEFAULTS_ENTRY, { role });
+		// 不套用时同样要记：这条是「该角色的初始设置已处理」的标记，缺了它下次加载会补套用角色默认模型
+		if (!res || res.applied) pi.appendEntry(ROLE_DEFAULTS_ENTRY, { role });
 		roleCard = readOptionalFile(cardPath);
 		self.role = role;
 		self.roleSlot = slot;
 		self.name = slot;
-		if (res.model) self.model = `${res.model.provider}/${res.model.id}`;
+		if (res?.model) self.model = `${res.model.provider}/${res.model.id}`;
 		pi.appendEntry(ROLE_ENTRY, { role, name: slot });
 		store.register(self);
 		pi.events.emit("peer:identity-changed", { name: self.name, role: self.role });
