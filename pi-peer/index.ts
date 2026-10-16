@@ -18,6 +18,7 @@
  *   /peer-new [--role 角色]  当前终端新建会话并领取角色；同角色实例自动命名为 dev、dev-2……
  *   /peer-reload         当前终端新建会话，上下文清空，名字、角色、模型与思考等级沿用当前
  *   /peer-role [角色|none]  查看/中途切换本会话角色（换角色卡、应用角色默认模型）；不带参弹列表选，none 取消
+ *   /peer-focus [off]    进入/退出专注模式：对其他会话隐身、不接收消息，自己发出一条消息后自动退出
  *
  * 角色会话：领取角色时把角色卡与项目流程注入 system prompt，消息按具体实例名寻址。
  * 重启会话会沿用会话里记录的角色（含中途切换与取消）。
@@ -112,6 +113,12 @@ const bufferedHandoffs = new Map<
 	string,
 	{ handoff: NonNullable<PeerMessage["handoff"]>; woken: boolean; until: number }
 >();
+/**
+ * 专注模式：对其他会话隐身、不接收消息；自己发出一条消息后自动退出。
+ *
+ * 只在进程内，重启即恢复可见——静音状态忘了退出比被打断更难发现。
+ */
+let focused = false;
 
 export default function (pi: ExtensionAPI) {
 	// 关掉时整个扩展不注册：工具、命令、心跳、收件箱监听都不起
@@ -559,6 +566,16 @@ export default function (pi: ExtensionAPI) {
 		return `找不到目标“${to}”。可用 peer_list 查看；现有会话：${names || "（无）"}${cross}`;
 	}
 
+	/**
+	 * 自己主动发出一句话就退出专注模式。
+	 *
+	 * 只挂在工具与 /peer-send 上：代其他扩展（工单派工与交接）的投递不算本会话开口，
+	 * 在 deliverTo 里解除会让系统代投意外把自己叫醒。
+	 */
+	function exitFocusIfNeeded(): void {
+		if (focused) setFocus(false, "已发出消息");
+	}
+
 	// ── TUI 渲染：把注入的消息画成对话气泡 ────────────
 
 	pi.registerMessageRenderer(LEGACY_PEER_TYPE, renderPeerMessage);
@@ -586,8 +603,10 @@ export default function (pi: ExtensionAPI) {
 			const scopeAll = params.scope === "all";
 
 			// scope=all 时一次扫完全部桶；本项目那部分从这里分出来，不再单独读一次
-			const scan = scopeAll ? store.listAllMembers({ includeStale: true }) : undefined;
-			const ownAll = scan ? scan.filter((s) => s.bucket === store!.dir) : store.listScoped({ includeStale });
+			const scan = scopeAll ? store.listAllMembers({ includeStale: true, selfKey: self.key }) : undefined;
+			const ownAll = scan
+				? scan.filter((s) => s.bucket === store!.dir)
+				: store.listScoped({ includeStale, selfKey: self.key });
 			const me = ownAll.find((s) => s.member.key === self!.key);
 			const own = ownAll.filter((s) => s.member.key !== self!.key);
 			const foreign = (scan ?? []).filter((s) => s.bucket !== store!.dir && s.member.key !== self!.key);
@@ -595,7 +614,15 @@ export default function (pi: ExtensionAPI) {
 			// 「在忙」只是提示：手动发消息照样能发，会自动插到对方当前这轮之后
 			const render = (m: Member, live: boolean, label: string, isSelf = false) => {
 				const age = Math.round((Date.now() - m.lastSeen) / 1000);
-				const tag = isSelf ? (m.role ? `（我，角色：${m.role}）` : "（我）") : m.role ? `（角色：${m.role}）` : "";
+				const tag = isSelf
+					? m.hidden
+						? "（我·专注中，其他会话看不到）"
+						: m.role
+							? `（我，角色：${m.role}）`
+							: "（我）"
+					: m.role
+						? `（角色：${m.role}）`
+						: "";
 				return (
 					`- ${label}${tag}｜${m.model}｜${live ? (isBusy(m) ? "在线·在忙" : "在线·空闲") : "离线"}` +
 					`｜id=${m.key}｜pid=${m.pid}｜${age}s 前心跳`
@@ -651,6 +678,7 @@ export default function (pi: ExtensionAPI) {
 
 			const msg = deliverTo(res, params.text, { replyTo: params.replyTo, thread: params.thread, priority });
 			if (!msg) return text("pi-peer 未启用（未注册成功）");
+			exitFocusIfNeeded();
 			ctx?.ui.notify(`→ ${res.member.name}: ${firstLine(msg.text)}`, "info");
 
 			return text(
@@ -1020,10 +1048,32 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			deliverTo(res, m[2], { priority: urgent ? "urgent" : "normal" });
+			exitFocusIfNeeded();
 			ctx.ui.notify(
 				`→ ${res.member.name}（已写入收件箱，${urgent ? "urgent / steer" : "normal / followUp"}）`,
 				"info",
 			);
+		},
+	});
+
+	pi.registerCommand("peer-focus", {
+		description: "进入/退出专注模式：进入后对其他会话隐身、不接收消息，自己发出一条消息后自动退出（off 手动退出）",
+		handler: async (args, ctx) => {
+			if (!store || !self) {
+				ctx.ui.notify("pi-peer 未启用", "warning");
+				return;
+			}
+			const want = args.trim().toLowerCase();
+			if (want && want !== "on" && want !== "off") {
+				ctx.ui.notify("用法：/peer-focus [on|off]", "warning");
+				return;
+			}
+			const on = want !== "off";
+			if (on === focused) {
+				ctx.ui.notify(on ? "已在专注模式；发出一条消息或 /peer-focus off 退出" : "当前不在专注模式", "info");
+				return;
+			}
+			setFocus(on);
 		},
 	});
 
@@ -1259,7 +1309,36 @@ function refreshStatus(): void {
 	const ctx = ctxRef;
 	if (!ctx?.hasUI || !store || !self) return;
 	const n = livePeers().length;
-	ctx.ui.setStatus("pi-peer", n > 0 ? ctx.ui.theme.fg("dim", `⇄ ${n}`) : undefined);
+	const label = focused ? (n > 0 ? `◌ 专注 · ${n}` : "◌ 专注") : n > 0 ? `⇄ ${n}` : undefined;
+	ctx.ui.setStatus("pi-peer", label ? ctx.ui.theme.fg("dim", label) : undefined);
+}
+
+/**
+ * 进入/退出专注模式。
+ *
+ * 进入时把自己标成 hidden（别的会话在列表、解析、投递里都看不到）并停掉收件箱投递；
+ * 退出时恢复可见并把专注期间积压的消息投进来。
+ */
+function setFocus(on: boolean, reason?: string): void {
+	if (!store || !self || focused === on) return;
+	focused = on;
+	self.hidden = on ? true : undefined;
+	try {
+		store.register(self);
+	} catch {
+		// 写不进去不影响本地状态，下次心跳会重写
+	}
+	refreshStatus();
+	const ui = ctxRef?.hasUI ? ctxRef.ui : undefined;
+	if (on) {
+		ui?.notify(
+			"已进入专注模式：其他会话看不到这个会话，也不再收到消息；自己发出一条消息后自动退出（/peer-focus off 手动退出）",
+			"info",
+		);
+		return;
+	}
+	ui?.notify(reason ? `已退出专注模式（${reason}）` : "已退出专注模式", "info");
+	scheduleDrain();
 }
 
 function scheduleDrain(): void {
@@ -1272,7 +1351,8 @@ function scheduleDrain(): void {
 }
 
 async function drainAndDeliver(): Promise<void> {
-	if (draining || !store || !self) return;
+	// 专注期间不取收件箱：消息留在 pending，退出后再投；也不唤醒本轮
+	if (focused || draining || !store || !self) return;
 	draining = true;
 	const activeStore = store;
 	const activeMember = self;
@@ -1322,7 +1402,7 @@ function wakeHandoff(): () => void {
 	const key = self?.key;
 	return () =>
 		queueMicrotask(() => {
-			if (!key || self?.key !== key) return;
+			if (!key || self?.key !== key || focused) return;
 			try {
 				receiver?.sendUserMessage("请处理刚收到的工单交接，先用 orders_show 核实当前状态再行动。", {
 					deliverAs: "followUp",
@@ -1446,6 +1526,7 @@ function teardown(): void {
 	if (persistenceTimer) clearTimeout(persistenceTimer);
 	persistenceTimer = undefined;
 	bufferedHandoffs.clear();
+	focused = false;
 	if (heartbeatTimer) clearInterval(heartbeatTimer);
 	if (pollTimer) clearInterval(pollTimer);
 	if (drainTimer) clearTimeout(drainTimer);

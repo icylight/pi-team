@@ -45,6 +45,7 @@ function member(
 		cwd: string;
 		busy: boolean;
 		busySince: number;
+		hidden: boolean;
 	}> = {},
 ) {
 	const m = {
@@ -463,5 +464,55 @@ describe("忙闲：派工只找空闲的会话", () => {
 		const result = store.deliverTo("busy-two", { from: "s", fromName: "人", text: "插一句" });
 		assert.equal(result.ok, true);
 		assert.equal(store.drain("8401-2222").length, 1);
+	});
+});
+
+describe("专注模式：隐身的会话不让别人选到", () => {
+	it("隐身成员不出现在别人的列表里，自己的列表里带 selfKey 还看得到", () => {
+		const store = freshStore();
+		member(store, "9000-1111", "watcher");
+		member(store, "9001-2222", "focused", { hidden: true });
+
+		const others = store.listScoped().map((s) => s.member.name);
+		assert.deepEqual(others, ["watcher"], "别人看不到隐身的会话");
+		const mine = store.listScoped({ selfKey: "9001-2222" }).map((s) => s.member.name);
+		assert.deepEqual(mine.sort(), ["focused", "watcher"], "本人仍然看得到自己");
+	});
+
+	it("resolve 找不到隐身成员，报 none 而不是 offline：它确实在跑，只是不接", () => {
+		const store = freshStore();
+		const me = member(store, "9100-1111", "sender");
+		member(store, "9101-2222", "focused", { hidden: true });
+
+		const res = store.resolve("focused", me.key);
+		assert.equal(res.ok, false);
+		assert.equal(res.ok === false && res.reason, "none");
+		assert.equal(store.resolveIdle("focused", me.key).ok, false, "派工路径同样选不中");
+	});
+
+	it("隐身成员自己给自己发也照样报 self", () => {
+		const store = freshStore();
+		member(store, "9200-1111", "focused", { hidden: true });
+		const res = store.resolve("focused", "9200-1111");
+		assert.equal(res.ok === false && res.reason, "self");
+	});
+
+	it("deliverTo 投不进隐身会话的收件箱", () => {
+		const store = freshStore();
+		member(store, "9300-1111", "focused", { hidden: true });
+
+		const result = store.deliverTo("focused", { from: "s", fromName: "扫描器", text: "该你了" });
+		assert.equal(result.ok, false);
+		assert.equal(result.ok === false && result.reason, "none");
+		assert.equal(store.drain("9300-1111").length, 0);
+	});
+
+	it("跨项目寻址一样看不到隐身的会话", () => {
+		const { a, b } = crossPair();
+		member(a, "9400-1111", "me");
+		member(b, "9401-2222", "hidden-owner", { hidden: true, project: "proj-b" });
+
+		assert.equal(a.resolveScoped("proj-b", "hidden-owner", "9400-1111").ok, false);
+		assert.equal(a.resolveScoped("proj-b", "hidden-owner", "9400-1111").candidates.length, 0);
 	});
 });

@@ -78,6 +78,8 @@ export interface Member {
 	busy?: boolean;
 	/** 这一轮什么时候开始的：busy 卡住（中断没触发 agent_end）时按超时兜底 */
 	busySince?: number;
+	/** 专注模式（/peer-focus）：对其他会话隐身。别的会话在列表、解析与投递里都看不到它 */
+	hidden?: boolean;
 }
 
 /** 忙超过这个时长就当它卡住了：不再信任 busy，避免一次异常让该会话永远收不到消息 */
@@ -377,18 +379,18 @@ export class PeerStore {
 		return [...live, ...stale].sort((a, b) => (a.member.startedAt ?? 0) - (b.member.startedAt ?? 0));
 	}
 
-	/** 本项目桶的成员，带存活标记 */
-	listScoped(opts: { includeStale?: boolean } = {}): ScopedMember[] {
-		return this.readBucket(this.dir).filter((s) => opts.includeStale || s.live);
+	/** 本项目桶的成员，带存活标记。专注模式的成员只对本人可见（selfKey） */
+	listScoped(opts: { includeStale?: boolean; selfKey?: string } = {}): ScopedMember[] {
+		return withoutHidden(this.readBucket(this.dir), opts.selfKey).filter((s) => opts.includeStale || s.live);
 	}
 
 	/** 列出存活成员（顺带清理过期注册表） */
-	listMembers(opts: { includeStale?: boolean } = {}): Member[] {
+	listMembers(opts: { includeStale?: boolean; selfKey?: string } = {}): Member[] {
 		return this.listScoped(opts).map((s) => s.member);
 	}
 
 	/** 扫全部桶：有谁在、在哪个桶、属于哪个项目 */
-	listAllMembers(opts: { includeStale?: boolean } = {}): ScopedMember[] {
+	listAllMembers(opts: { includeStale?: boolean; selfKey?: string } = {}): ScopedMember[] {
 		let names: string[];
 		try {
 			names = fs.readdirSync(this.root);
@@ -404,7 +406,7 @@ export class PeerStore {
 			} catch {
 				continue;
 			}
-			for (const s of this.readBucket(bucket)) {
+			for (const s of withoutHidden(this.readBucket(bucket), opts.selfKey)) {
 				if (s.live || opts.includeStale) out.push(s);
 			}
 		}
@@ -458,7 +460,7 @@ export class PeerStore {
 		const q = query.trim().replace(/^@/, "");
 		if (!q) return { ok: false, reason: "none", candidates: [] };
 
-		const members = this.readBucket(this.dir);
+		const members = withoutHidden(this.readBucket(this.dir), selfKey);
 		if (members.some((s) => s.member.key === selfKey && matchesQuery(s.member, q))) {
 			return { ok: false, reason: "self", candidates: [] };
 		}
@@ -469,7 +471,7 @@ export class PeerStore {
 	resolveIdle(query: string, selfKey: string): ResolveResult {
 		const q = query.trim().replace(/^@/, "");
 		if (!q) return { ok: false, reason: "none", candidates: [] };
-		const members = this.readBucket(this.dir);
+		const members = withoutHidden(this.readBucket(this.dir), selfKey);
 		if (members.some((s) => s.member.key === selfKey && matchesQuery(s.member, q))) {
 			return { ok: false, reason: "self", candidates: [] };
 		}
@@ -483,7 +485,7 @@ export class PeerStore {
 	 */
 	resolveScoped(project: string, name: string, selfKey: string): ResolveResult {
 		const q = name.trim().replace(/^@/, "");
-		const all = this.listAllMembers({ includeStale: true });
+		const all = this.listAllMembers({ includeStale: true, selfKey });
 
 		const self = all.find((s) => s.member.key === selfKey);
 		if (self && self.project === project && matchesQuery(self.member, q)) {
@@ -704,6 +706,16 @@ export class PeerStore {
 /** 忙：声明了 busy 且在超时窗口内；卡住的 busy 不算，否则一次异常就永远收不到派工 */
 export function isBusy(member: Member): boolean {
 	return Boolean(member.busy) && Date.now() - (member.busySince ?? 0) < BUSY_STALE_MS;
+}
+
+/**
+ * 隐身过滤：专注模式（hidden）的成员只对本人可见。
+ *
+ * 不是另报一个「专注中」状态——隐身的用处就是让派工方根本选不中它，
+ * 而不是看到一个要额外判断的强提示。传 selfKey 是为了让自己仍然看得到自己。
+ */
+function withoutHidden(scoped: ScopedMember[], selfKey?: string): ScopedMember[] {
+	return scoped.filter((s) => !s.member.hidden || s.member.key === selfKey);
 }
 
 function assertKey(key: string): void {
