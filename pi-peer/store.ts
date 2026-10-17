@@ -213,6 +213,59 @@ function stamp(ts: number): string {
 	return `${String(ts).padStart(16, "0")}-${String(stampSeq).padStart(3, "0")}`;
 }
 
+/**
+ * 按 pid 归组一个桶里的老 key，补出 `identities.json`。
+ *
+ * 独立成函数是因为桶目录名由 `cwdKey(cwd)` 生成、反推不出 cwd：
+ * 要批量处理全部桶时，只有目录没有 cwd。
+ */
+export function backfillBucketIdentities(bucketDir: string): { key: string; group: string }[] {
+	const identityFile = path.join(bucketDir, "identities.json");
+	let all: Record<string, { sessionFile?: string; name: string; at: number }> = {};
+	try {
+		const parsed = JSON.parse(fs.readFileSync(identityFile, "utf8")) as unknown;
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			all = parsed as typeof all;
+		}
+	} catch {
+		// 没有账或读不动：从空账开始
+	}
+
+	let keys: string[] = [];
+	try {
+		keys = fs.readdirSync(path.join(bucketDir, "delivered"));
+	} catch {
+		return [];
+	}
+	const byPid = new Map<string, string[]>();
+	for (const key of keys) {
+		if (!KEY_RE.test(key)) continue;
+		const pid = key.split("-")[0];
+		if (!pid) continue;
+		const list = byPid.get(pid) ?? [];
+		list.push(key);
+		byPid.set(pid, list);
+	}
+
+	const changed: { key: string; group: string }[] = [];
+	for (const [pid, group] of byPid) {
+		if (group.length < 2) continue;
+		const groupTag = `pid:${pid}`;
+		for (const key of group) {
+			const known = all[key];
+			// 已登记真实会话文件的保持原样：那是更可靠的归属
+			if (known?.sessionFile && !known.sessionFile.startsWith("pid:")) continue;
+			all[key] = { sessionFile: groupTag, name: known?.name ?? `会话 ${pid}`, at: known?.at ?? Date.now() };
+			changed.push({ key, group: groupTag });
+		}
+	}
+	if (changed.length) {
+		fs.mkdirSync(bucketDir, { recursive: true, mode: DIR_MODE });
+		writeAtomic(identityFile, all);
+	}
+	return changed;
+}
+
 export class PeerStore {
 	/** 共享根目录：跨项目扫描要遍历它下面的桶 */
 	readonly root: string;
@@ -345,36 +398,7 @@ export class PeerStore {
 	 * 返回改了哪些 key，空数组表示没有可回填的。
 	 */
 	backfillIdentities(): { key: string; group: string }[] {
-		const all = this.readIdentities();
-		const byPid = new Map<string, string[]>();
-		let keys: string[] = [];
-		try {
-			keys = fs.readdirSync(path.join(this.dir, "delivered"));
-		} catch {
-			return [];
-		}
-		for (const key of keys) {
-			if (!KEY_RE.test(key)) continue;
-			const pid = key.split("-")[0];
-			if (!pid) continue;
-			const list = byPid.get(pid) ?? [];
-			list.push(key);
-			byPid.set(pid, list);
-		}
-		const changed: { key: string; group: string }[] = [];
-		for (const [pid, group] of byPid) {
-			if (group.length < 2) continue;
-			const groupTag = `pid:${pid}`;
-			for (const key of group) {
-				const known = all[key];
-				// 已登记真实会话文件的保持原样：那是更可靠的归属
-				if (known?.sessionFile && !known.sessionFile.startsWith("pid:")) continue;
-				all[key] = { sessionFile: groupTag, name: known?.name ?? `会话 ${pid}`, at: known?.at ?? Date.now() };
-				changed.push({ key, group: groupTag });
-			}
-		}
-		if (changed.length) this.writeIdentities(all);
-		return changed;
+		return backfillBucketIdentities(this.dir);
 	}
 
 	/** 认领角色实例名：第一个用基础角色，后续追加 -2、-3…… */
