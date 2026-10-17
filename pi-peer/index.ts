@@ -518,6 +518,8 @@ export default function (pi: ExtensionAPI) {
 		} = {},
 	): PeerMessage | undefined {
 		if (!store || !self) return undefined;
+		// 同一份交接已在收件箱里排队时不再写第二条：台账按租约重投，目标忙的时候会连投很多次
+		if (opts.handoff && store.hasPendingHandoff(res.member.key, opts.handoff.id)) return undefined;
 		const parent = opts.replyTo ? store.findMessage(self.key, opts.replyTo) : undefined;
 		const id = newMessageId();
 		const msg: PeerMessage = {
@@ -1453,7 +1455,13 @@ async function drainAndDeliver(): Promise<void> {
 				await handleControl?.(msg);
 			} else if (msg.handoff) {
 				const persisted = diskHasHandoff(msg.handoff.id);
-				if (self.busy || ctxRef?.isIdle?.() === false) continue;
+				if (self.busy || ctxRef?.isIdle?.() === false) {
+					// 忙就放回去等下一轮：drain 已把它 rename 进 delivered，
+					// 直接 continue 等于「既没送到、又不在收件箱」，而台账那边看不到确认，
+					// 过 15s 换新 lease 再投一次——实测同一份交接这样重复了 52 次。
+					activeStore.requeue(activeMember.key, msg);
+					continue;
+				}
 				api?.events.emit("work-orders:consume-handoff", {
 					...msg.handoff,
 					alreadyPersisted: persisted === true,

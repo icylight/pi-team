@@ -8,6 +8,12 @@ import { isHumanActor } from "./types.ts";
 
 export const NOTIFICATION_PROTOCOL = 1;
 const LEASE_MS = 15_000;
+/**
+ * 注入尝试上限：只记「提交了注入但没确认成功」的次数。
+ *
+ * 目标在忙时退回等待不算尝试——那是最常见的正常状态，算进去会让活跃会话收不到交接。
+ * 重投本身不再无限：peer 侧对同一 handoff.id 在收件箱里只留一条，忙的时候消息不堆。
+ */
 const MAX_ATTEMPTS = 3;
 
 export interface Handoff {

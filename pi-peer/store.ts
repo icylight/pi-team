@@ -747,6 +747,55 @@ export class PeerStore {
 		return out;
 	}
 
+	/**
+	 * 收件箱里是否已有同一份交接。
+	 *
+	 * 台账那边按 15 秒租约重投，每次会写一条新消息；目标在忙时这些消息都堆在 pending 里
+	 * 等着注入，同一份交接就会重复注入多次。按 handoff.id 去重，只留一条。
+	 */
+	hasPendingHandoff(key: string, handoffId: string): boolean {
+		assertKey(key);
+		let files: string[];
+		try {
+			files = fs.readdirSync(this.pendingDir(key)).filter((f) => f.endsWith(".json"));
+		} catch {
+			return false;
+		}
+		for (const f of files) {
+			const msg = readJson<PeerMessage>(path.join(this.pendingDir(key), f));
+			if (msg?.handoff?.id === handoffId) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 把一条已取走的消息放回收件箱：drain 是 rename，文件已经不在 pending 里。
+	 *
+	 * 用途是「取走了但没送出去」：目标在忙时不能注入，但也不该把这条消息留在 delivered
+	 * ——那等于既没送到，又看不见，而且下一轮重投会再生成一条新的。
+	 *
+	 * 找文件靠 id 反查：drain 返回的 PeerMessage 不带文件名。
+	 */
+	requeue(key: string, msg: PeerMessage): boolean {
+		assertKey(key);
+		const delivered = this.deliveredDir(key);
+		const pending = this.pendingDir(key);
+		let files: string[];
+		try {
+			files = fs.readdirSync(delivered).filter((f) => f.endsWith(`-${msg.id}.json`));
+		} catch {
+			return false;
+		}
+		if (files.length === 0) return false;
+		fs.mkdirSync(pending, { recursive: true, mode: DIR_MODE });
+		try {
+			fs.renameSync(path.join(delivered, files[0]!), path.join(pending, files[0]!));
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	/** 已投递历史（新→旧），用于回看与回复链追踪 */
 	history(key: string, limit = 20): PeerMessage[] {
 		let files: string[];
