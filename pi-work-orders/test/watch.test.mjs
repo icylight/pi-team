@@ -142,7 +142,7 @@ test("停滞的单按下一步找谁分组，等自己的排最前", () => {
 
 	const note = buildWatchText(db, { me: "owner", config: base });
 	const lines = note.text.split("\n");
-	assert.match(lines[0], /这轮 3 条停滞单/);
+	assert.match(lines[0], /这轮 3 条（每 15m 自查）：停滞 3 条/);
 	assert.equal(lines[1], "等你动的 1 条：");
 	assert.match(lines[2], new RegExp(`${mine.id} .*改登录页`));
 	assert.equal(lines[3], "等 qa 的 1 条：");

@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { buildDigest, renderStale } from "./core/digest.ts";
+import { buildDigest, buildDispatchBrief, formatDispatchBrief, renderStale } from "./core/digest.ts";
 import { describeError, formatHistory, formatList, formatOrder, formatWaiting } from "./core/format.ts";
 import {
 	acknowledgeNotification,
@@ -41,6 +41,7 @@ import {
 	addDep,
 	countBlockedDownstream,
 	createOrder,
+	deliveryDeviation,
 	getOrder,
 	listHint,
 	listOrders,
@@ -600,7 +601,13 @@ export default function (pi: ExtensionAPI) {
 					const view = getOrder(db, params.id);
 					const limit = Math.min(20, Math.max(0, Math.floor(params.history ?? 5)));
 					const events = limit ? eventsOf(db, params.id, limit) : [];
-					return [formatOrder(view), events.length ? `最近动作：\n${formatHistory(events)}` : ""]
+					// 派工要看的是现场：卡哪个前置、前置留下什么、能不能先占位、手上那份过期没
+					const brief = formatDispatchBrief(buildDispatchBrief(db, view));
+					return [
+						formatOrder(view, { deviation: deliveryDeviation(view) }),
+						brief ? `现场：\n${brief}` : "",
+						events.length ? `最近动作：\n${formatHistory(events)}` : "",
+					]
 						.filter(Boolean)
 						.join("\n\n");
 				}),
@@ -612,7 +619,7 @@ export default function (pi: ExtensionAPI) {
 		name: "orders_create",
 		label: "建工单",
 		description:
-			"建一条工单。正文写目标、交付物、边界、输入、验收口径（markdown）；详细内容可用 contents 关联具名 md 文件。dependsOn 传上游工单号，会做环检测。",
+			"建一条工单。正文写目标、交付物、边界、输入、验收口径（markdown）；详细内容可用 contents 关联具名 md 文件。dependsOn 传上游工单号，会做环检测。有把握的话一并给估算（主动工时 / 墙钟 / 依据），没估也能建，只是没有进度提醒。",
 		parameters: Type.Object({
 			title: Type.String({ description: "一句话说清这条要干什么" }),
 			nextActors: Type.Array(Type.String(), {
@@ -627,6 +634,14 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 			dependsOn: Type.Optional(Type.Array(Type.String({ description: "上游工单号" }))),
+			estimateActiveMin: Type.Optional(
+				Type.Number({ description: "预估主动工时（分钟）：真正在干的时间，不含等待" }),
+			),
+			estimateWallMin: Type.Optional(
+				Type.Number({ description: "预估墙钟（分钟）：从现在到收尾的自然时间，含等待与中断" }),
+			),
+			estimateBasis: Type.Optional(Type.String({ description: "评估依据与不确定性：为什么是这个数、哪块没底" })),
+			placeholderBasis: Type.Optional(Type.String({ description: "可按占位继续的依据；不写表示必须等前置收口" })),
 			reason: Type.Optional(Type.String({ description: "这条为什么要建" })),
 			actor: Type.Optional(Type.String({ description: "操作者名字，默认取本会话名" })),
 		}),
@@ -645,10 +660,16 @@ export default function (pi: ExtensionAPI) {
 							nextActors: params.nextActors,
 							role: params.role as StateRole | undefined,
 							dependsOn: params.dependsOn,
+							estimate: {
+								activeMin: params.estimateActiveMin,
+								wallMin: params.estimateWallMin,
+								basis: params.estimateBasis,
+							},
+							placeholderBasis: params.placeholderBasis,
 						},
 						{ actor: me, reason: params.reason ?? "建单" },
 					);
-					return { text: formatOrder(view), order: view };
+					return { text: formatOrder(view, { deviation: deliveryDeviation(view) }), order: view };
 				});
 			} catch (error) {
 				return fail(error);
@@ -661,7 +682,7 @@ export default function (pi: ExtensionAPI) {
 		name: "orders_update",
 		label: "改工单",
 		description:
-			"改工单状态或字段。转换按角色校验（未声明的转换会拒绝）；结单必须有终止依据（证据指针），取消必须给理由或取代它的单号。appendBody 用于范围修订：追加一段，不覆盖旧句。",
+			"改工单状态或字段。转换按角色校验（未声明的转换会拒绝）；结单必须有终止依据（证据指针），取消必须给理由或取代它的单号。正文以当前有效口径为准：范围修订直接用 body 覆盖旧口径（理由写进 reason），appendBody 只用于补一小段，别靠追加堆大部头。收口时回填实际工时与实际偏差。",
 		parameters: Type.Object({
 			id: Type.String({ description: "工单号" }),
 			reason: Type.String({ description: "为什么这么改（必填）" }),
@@ -670,9 +691,16 @@ export default function (pi: ExtensionAPI) {
 				Type.Array(Type.String(), { description: "改成谁：给一个就是这个人接手，给多个就是重新指定备选" }),
 			),
 			title: Type.Optional(Type.String({ description: "改标题" })),
-			body: Type.Optional(Type.String({ description: "整段替换正文（少用）；传空串表示这次不改正文" })),
+			body: Type.Optional(
+				Type.String({
+					description:
+						"换掉正文：范围修订与口径变化用这个，改完正文就是唯一有效的说法（旧口径由 reason 与动作记录留痕）；传空串表示这次不改正文",
+				}),
+			),
 			appendBody: Type.Optional(
-				Type.String({ description: "追加一段正文（范围修订用这个）；与同一次调用的其他字段同事务" }),
+				Type.String({
+					description: "往正文末尾补一小段（只用于补充，不用于范围修订）；与同一次调用的其他字段同事务",
+				}),
 			),
 			contents: Type.Optional(
 				Type.Array(ContentEntrySchema, {
@@ -680,6 +708,16 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 			closingBasis: Type.Optional(Type.String({ description: "终止依据：结单填证据指针，取消填理由/被谁取代" })),
+			estimateActiveMin: Type.Optional(Type.Number({ description: "预估主动工时（分钟）；改估就直接覆盖" })),
+			estimateWallMin: Type.Optional(Type.Number({ description: "预估墙钟（分钟）；改估就直接覆盖" })),
+			estimateBasis: Type.Optional(Type.String({ description: "评估依据与不确定性" })),
+			actualActiveMin: Type.Optional(Type.Number({ description: "实际主动工时（分钟），交付时回填" })),
+			actualWallMin: Type.Optional(Type.Number({ description: "实际墙钟（分钟），交付时回填" })),
+			actualWaitMin: Type.Optional(Type.Number({ description: "其中等待依赖占用的分钟数，交付时回填" })),
+			deliveryVariance: Type.Optional(
+				Type.String({ description: "偏差原因：实际与估算差在哪（等待、返工、范围变化…）" }),
+			),
+			placeholderBasis: Type.Optional(Type.String({ description: "可按占位继续的依据；传空串表示取消这个许可" })),
 			expectedRevision: Type.Optional(Type.Number({ description: "手里这条的 rev，用于并发冲突检测" })),
 			actor: Type.Optional(Type.String({ description: "操作者名字，默认取本会话名" })),
 		}),
@@ -699,7 +737,15 @@ export default function (pi: ExtensionAPI) {
 						body != null ||
 						append != null ||
 						params.contents !== undefined ||
-						params.closingBasis != null;
+						params.closingBasis != null ||
+						params.estimateActiveMin != null ||
+						params.estimateWallMin != null ||
+						params.estimateBasis != null ||
+						params.actualActiveMin != null ||
+						params.actualWallMin != null ||
+						params.actualWaitMin != null ||
+						params.deliveryVariance != null ||
+						params.placeholderBasis !== undefined;
 					// 正文追加跟字段写入走同一次 updateOrder：一起生效或一起回滚，
 					// 否则第二次调用报错时，正文已经落库，调用方却以为失败。
 					const view = needsPatch
@@ -714,6 +760,18 @@ export default function (pi: ExtensionAPI) {
 									appendBody: append,
 									contents: params.contents,
 									closingBasis: params.closingBasis,
+									estimate: {
+										activeMin: params.estimateActiveMin,
+										wallMin: params.estimateWallMin,
+										basis: params.estimateBasis,
+									},
+									actual: {
+										activeMin: params.actualActiveMin,
+										wallMin: params.actualWallMin,
+									},
+									actualWaitMin: params.actualWaitMin,
+									deliveryVariance: params.deliveryVariance,
+									placeholderBasis: params.placeholderBasis,
 								},
 								actorCtx,
 								params.expectedRevision,
@@ -724,7 +782,16 @@ export default function (pi: ExtensionAPI) {
 						const downstream = countBlockedDownstream(db, params.id);
 						if (downstream > 0) notes.push(`下游还有 ${downstream} 条未收口，确认它们的前置是否已经落空`);
 					}
-					return { text: [formatOrder(view), ...notes].join("\n\n"), order: view };
+					if (params.actualActiveMin != null && params.deliveryVariance == null && view.estimate.wallMin != null) {
+						const dev = deliveryDeviation(view);
+						if (dev.wallMin != null && Math.abs(dev.wallMin) > Math.max(10, view.estimate.wallMin * 0.2)) {
+							notes.push("实际与估算差得多，建议用 deliveryVariance 写下差在哪（等待、返工、范围变化）");
+						}
+					}
+					return {
+						text: [formatOrder(view, { deviation: deliveryDeviation(view) }), ...notes].join("\n\n"),
+						order: view,
+					};
 				});
 			} catch (error) {
 				return fail(error);

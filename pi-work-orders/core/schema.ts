@@ -22,7 +22,7 @@ import {
 	WAITING_ROLES,
 } from "./types.ts";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export const DEFAULT_DB_DIR = ".work-orders";
 export const DEFAULT_DB_NAME = "work-orders.sqlite";
 
@@ -41,6 +41,14 @@ CREATE TABLE orders (
   state         TEXT NOT NULL,
   next_actors   TEXT NOT NULL CHECK (json_valid(next_actors)),
   closing_basis TEXT,
+  estimate_active_min INTEGER,
+  estimate_wall_min   INTEGER,
+  estimate_basis      TEXT,
+  actual_active_min   INTEGER,
+  actual_wall_min     INTEGER,
+  actual_wait_min     INTEGER,
+  delivery_variance   TEXT,
+  placeholder_basis   TEXT,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL,
   revision      INTEGER NOT NULL DEFAULT 1
@@ -74,6 +82,16 @@ CREATE INDEX events_order  ON events(order_id, id);
  * 只加表、加列，不重建：旧库里已有的数据不动。
  */
 const MIGRATIONS: Record<number, string> = {
+	4: `
+ALTER TABLE orders ADD COLUMN estimate_active_min INTEGER;
+ALTER TABLE orders ADD COLUMN estimate_wall_min   INTEGER;
+ALTER TABLE orders ADD COLUMN estimate_basis      TEXT;
+ALTER TABLE orders ADD COLUMN actual_active_min   INTEGER;
+ALTER TABLE orders ADD COLUMN actual_wall_min     INTEGER;
+ALTER TABLE orders ADD COLUMN actual_wait_min     INTEGER;
+ALTER TABLE orders ADD COLUMN delivery_variance   TEXT;
+ALTER TABLE orders ADD COLUMN placeholder_basis   TEXT;
+`,
 	3: `
 ALTER TABLE orders ADD COLUMN contents TEXT NOT NULL DEFAULT '[]'
   CHECK (json_valid(contents) AND json_type(contents) = 'array');

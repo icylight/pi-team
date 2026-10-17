@@ -13,6 +13,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { normalizeContents } from "./contents.ts";
 import {
+	enteredStateAt,
 	getMeta,
 	idPrefixOf,
 	isTerminal,
@@ -29,6 +30,9 @@ import {
 	type ActorContext,
 	BASIS_REQUIRED,
 	type CreateInput,
+	type DeliveryDeviation,
+	ESTIMATE_WARN_RATIO,
+	type EstimateStatus,
 	LedgerError,
 	type ListedOrder,
 	type ListFilter,
@@ -83,10 +87,36 @@ function toOrder(row: Row): Order {
 		state: String(row.state),
 		nextActors: JSON.parse(String(row.next_actors)) as string[],
 		closingBasis: row.closing_basis == null ? null : String(row.closing_basis),
+		estimate: {
+			activeMin: numOrNull(row.estimate_active_min),
+			wallMin: numOrNull(row.estimate_wall_min),
+			basis: row.estimate_basis == null ? null : String(row.estimate_basis),
+		},
+		actual: {
+			activeMin: numOrNull(row.actual_active_min),
+			wallMin: numOrNull(row.actual_wall_min),
+		},
+		actualWaitMin: numOrNull(row.actual_wait_min),
+		deliveryVariance: row.delivery_variance == null ? null : String(row.delivery_variance),
+		placeholderBasis: row.placeholder_basis == null ? null : String(row.placeholder_basis),
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 		revision: Number(row.revision),
 	};
+}
+
+function numOrNull(value: unknown): number | null {
+	return value == null ? null : Number(value);
+}
+
+/**
+ * 工时的写入口子：正数整数分钟，其余一律报错。
+ * 负数和 0 都不是「快完工」而是写错了，静默收下会让估算进度提醒失灵。
+ */
+function assertMinutes(value: number | null | undefined, label: string): number | null {
+	if (value == null) return null;
+	if (!Number.isFinite(value) || value <= 0) throw new LedgerError(`${label}要写正数分钟：${value}`);
+	return Math.round(value);
 }
 
 function mustFind(db: DatabaseSync, id: string): Order {
@@ -328,11 +358,17 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 	for (const dep of deps) assertNoCycle(db, id, dep);
 
 	const stamp = now();
+	const estimate = {
+		activeMin: assertMinutes(input.estimate?.activeMin, "预估主动工时"),
+		wallMin: assertMinutes(input.estimate?.wallMin, "预估墙钟"),
+		basis: input.estimate?.basis?.trim() || null,
+	};
 	db.exec("BEGIN IMMEDIATE;");
 	try {
 		db.prepare(
-			`INSERT INTO orders(id,title,body,contents,state,next_actors,closing_basis,created_at,updated_at,revision)
-			 VALUES(?,?,?,?,?,?,NULL,?,?,1)`,
+			`INSERT INTO orders(id,title,body,contents,state,next_actors,closing_basis,
+			 estimate_active_min,estimate_wall_min,estimate_basis,placeholder_basis,created_at,updated_at,revision)
+			 VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?,?,1)`,
 		).run(
 			id,
 			input.title.trim(),
@@ -340,6 +376,10 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 			JSON.stringify(contents),
 			states[role],
 			JSON.stringify(actors),
+			estimate.activeMin,
+			estimate.wallMin,
+			estimate.basis,
+			input.placeholderBasis?.trim() || null,
 			stamp,
 			stamp,
 		);
@@ -406,6 +446,33 @@ export function updateOrder(
 		state: targetState,
 		nextActors,
 		closingBasis: patch.closingBasis ?? old.closingBasis,
+		// 估算与实际的语义是「改哪个字段就只动哪个」，不给就保留：
+		// 交回去只补实际工时，不应该把开工前写的估算抹掉。
+		estimate: {
+			activeMin:
+				patch.estimate?.activeMin === undefined
+					? old.estimate.activeMin
+					: assertMinutes(patch.estimate.activeMin, "预估主动工时"),
+			wallMin:
+				patch.estimate?.wallMin === undefined
+					? old.estimate.wallMin
+					: assertMinutes(patch.estimate.wallMin, "预估墙钟"),
+			basis: patch.estimate?.basis === undefined ? old.estimate.basis : patch.estimate.basis?.trim() || null,
+		},
+		actual: {
+			activeMin:
+				patch.actual?.activeMin === undefined
+					? old.actual.activeMin
+					: assertMinutes(patch.actual.activeMin, "实际主动工时"),
+			wallMin:
+				patch.actual?.wallMin === undefined ? old.actual.wallMin : assertMinutes(patch.actual.wallMin, "实际墙钟"),
+		},
+		actualWaitMin:
+			patch.actualWaitMin === undefined ? old.actualWaitMin : assertMinutes(patch.actualWaitMin, "等待依赖时间"),
+		deliveryVariance:
+			patch.deliveryVariance === undefined ? old.deliveryVariance : patch.deliveryVariance?.trim() || null,
+		placeholderBasis:
+			patch.placeholderBasis === undefined ? old.placeholderBasis : patch.placeholderBasis?.trim() || null,
 	};
 
 	if (next.state !== old.state) assertTransition(db, old.state, next.state);
@@ -426,6 +493,8 @@ export function updateOrder(
 		const result = db
 			.prepare(
 				`UPDATE orders SET title=?, body=?, contents=?, state=?, next_actors=?, closing_basis=?,
+			 estimate_active_min=?, estimate_wall_min=?, estimate_basis=?,
+			 actual_active_min=?, actual_wall_min=?, actual_wait_min=?, delivery_variance=?, placeholder_basis=?,
 			 updated_at=?, revision=revision+1 WHERE id=? AND (? IS NULL OR revision=?)`,
 			)
 			.run(
@@ -435,6 +504,14 @@ export function updateOrder(
 				next.state,
 				JSON.stringify(nextActors),
 				next.closingBasis,
+				next.estimate.activeMin,
+				next.estimate.wallMin,
+				next.estimate.basis,
+				next.actual.activeMin,
+				next.actual.wallMin,
+				next.actualWaitMin,
+				next.deliveryVariance,
+				next.placeholderBasis,
 				now(),
 				id,
 				expectedRevision ?? null,
@@ -456,7 +533,12 @@ export function updateOrder(
 		} else if (
 			next.body !== old.body ||
 			next.title !== old.title ||
-			JSON.stringify(next.contents) !== JSON.stringify(old.contents)
+			JSON.stringify(next.contents) !== JSON.stringify(old.contents) ||
+			JSON.stringify(next.estimate) !== JSON.stringify(old.estimate) ||
+			JSON.stringify(next.actual) !== JSON.stringify(old.actual) ||
+			next.actualWaitMin !== old.actualWaitMin ||
+			next.deliveryVariance !== old.deliveryVariance ||
+			next.placeholderBasis !== old.placeholderBasis
 		) {
 			logEvent(db, { orderId: id, actor: ctx.actor, kind: "field", note: ctx.reason });
 		}
@@ -502,4 +584,90 @@ export function removeDep(db: DatabaseSync, id: string, dep: string, ctx: ActorC
 /** 取消一条时，下游会失去前置。这里是提示用的计数，不做自动处置 */
 export function countBlockedDownstream(db: DatabaseSync, id: string): number {
 	return downstreamOf(db, id).filter((o) => !isTerminal(db, o.state)).length;
+}
+
+// ── 估算与实际：进度、偏差、依赖产物 ────────────────
+
+/** 开工时刻：最近一次进入「在做」，没有就按建单时刻。估算进度从这里起算 */
+export function startedAt(db: DatabaseSync, order: Order): string {
+	return enteredStateAt(db, order.id, stateOf(db, "active")) ?? order.createdAt;
+}
+
+/** 已过去的墙钟分钟（自开工起）。未开工的单按建单时刻，与「等多久」口径一致 */
+export function elapsedMinutes(db: DatabaseSync, order: Order, at = Date.now()): number {
+	return Math.max(0, Math.round((at - Date.parse(startedAt(db, order))) / 60_000));
+}
+
+/**
+ * 估算进度。只有「在做」与「阻塞」算进度：待认领还没开工，待复核已经在等人，
+ * 把它们的等待时间算成执行落后，会催错人。
+ */
+export function estimateStatus(db: DatabaseSync, order: Order, at = Date.now()): EstimateStatus {
+	const wall = order.estimate.wallMin;
+	const role = roleOf(db, order.state);
+	if (wall == null || (role !== "active" && role !== "paused")) return { level: "none", ratio: null, remainMin: null };
+	const used = elapsedMinutes(db, order, at);
+	const ratio = used / wall;
+	const remainMin = wall - used;
+	if (ratio >= 1) return { level: "over", ratio, remainMin };
+	if (ratio >= ESTIMATE_WARN_RATIO) return { level: "warn", ratio, remainMin };
+	return { level: "ok", ratio, remainMin };
+}
+
+/** 等依赖的分钟数：只对「等依赖」这一类算，其余为 0 */
+export function dependencyWaitMinutes(db: DatabaseSync, order: Order, at = Date.now()): number {
+	const w = describeWaiting(db, order);
+	if (w.kind !== "dependency") return 0;
+	return Math.max(0, Math.round((at - Date.parse(w.since)) / 60_000));
+}
+
+/** 交付偏差：只做减法，不判断好坏。为什么差，看 deliveryVariance */
+export function deliveryDeviation(order: Order): DeliveryDeviation {
+	const wall =
+		order.actual.wallMin != null && order.estimate.wallMin != null
+			? order.actual.wallMin - order.estimate.wallMin
+			: null;
+	const active =
+		order.actual.activeMin != null && order.estimate.activeMin != null
+			? order.actual.activeMin - order.estimate.activeMin
+			: null;
+	// 等待时间优先用交付时填的那个数；没填才用「墙钟 - 主动工时」推。
+	// 手填的数是人核过的，两者不一致时以它为准。
+	const wait =
+		order.actualWaitMin ??
+		(order.actual.wallMin != null && order.actual.activeMin != null
+			? order.actual.wallMin - order.actual.activeMin
+			: null);
+	return { wallMin: wall, activeMin: active, waitMin: wait };
+}
+
+export interface UpstreamArtifact {
+	id: string;
+	title: string;
+	/** 上游收口时写的终止依据，通常就是产物指针 */
+	closingBasis: string | null;
+	/** 什么时候收的 */
+	at: string;
+}
+
+/**
+ * 近期已知产物：已收口的上游写下的终止依据。
+ * 派给下游时说清「能直接用的东西在哪」，省得它重跑一遍前置。
+ */
+export function upstreamArtifacts(db: DatabaseSync, orderId: string, limit = 5): UpstreamArtifact[] {
+	const done = stateOf(db, "done");
+	const rows = db
+		.prepare(
+			`SELECT up.id, up.title, up.closing_basis, up.updated_at
+			 FROM deps d JOIN orders up ON up.id = d.depends_on
+			 WHERE d.order_id = ? AND up.state = ?
+			 ORDER BY up.updated_at DESC LIMIT ?`,
+		)
+		.all(orderId, done, limit) as Row[];
+	return rows.map((r) => ({
+		id: String(r.id),
+		title: String(r.title),
+		closingBasis: r.closing_basis == null ? null : String(r.closing_basis),
+		at: String(r.updated_at),
+	}));
 }

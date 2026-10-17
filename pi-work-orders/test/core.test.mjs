@@ -440,8 +440,21 @@ test("只改正文记 field，不动状态就不算重新开始等", () => {
 test("v2 的库打开时逐版升级，数据不动", () => {
 	const { db, dbPath } = freshLedger();
 	createOrder(db, { title: "老数据", nextActors: ["dev"] }, owner);
-	// 退回 v2 结构：移除新列与 events 表，只操作临时测试库。
-	db.exec("ALTER TABLE orders DROP COLUMN contents;");
+	// 退回 v2 结构：移除 v3 之后的列与 events 表，只操作临时测试库。
+	// 新增列时要一并退掉，否则升级路径里的 ADD COLUMN 会撞上已存在的列。
+	for (const column of [
+		"contents",
+		"estimate_active_min",
+		"estimate_wall_min",
+		"estimate_basis",
+		"actual_active_min",
+		"actual_wall_min",
+		"actual_wait_min",
+		"delivery_variance",
+		"placeholder_basis",
+	]) {
+		db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
+	}
 	db.exec("DROP TABLE events;");
 	db.exec("PRAGMA user_version=2;");
 	db.close();

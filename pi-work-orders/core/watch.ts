@@ -12,9 +12,17 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { formatWaitingLine } from "./digest.ts";
-import { groupByActor, staleWaiting } from "./store.ts";
-import { isHumanActor, STALE_MINUTES, type Waiting } from "./types.ts";
+import { formatEstimateLine, formatWaitingLine } from "./digest.ts";
+import { formatAgo } from "./format.ts";
+import {
+	dependencyWaitMinutes,
+	estimateStatus,
+	groupByActor,
+	listOrders,
+	staleWaiting,
+	waitingOrders,
+} from "./store.ts";
+import { isHumanActor, STALE_MINUTES, WAIT_MINUTES, type Waiting } from "./types.ts";
 
 export interface WatchConfig {
 	/** 谁负责定时自查：角色名（peer 角色实例名，其次会话名）；空串 = 不跑 */
@@ -25,6 +33,8 @@ export interface WatchConfig {
 	staleMinutes: number;
 	/** 同一条单最短隔多少分钟再提一次 */
 	repeatMinutes: number;
+	/** 等依赖超过多少分钟提醒一次（与停滞分开：等依赖不是谁没干活） */
+	waitMinutes: number;
 }
 
 export const WATCH_DEFAULTS: WatchConfig = {
@@ -32,10 +42,17 @@ export const WATCH_DEFAULTS: WatchConfig = {
 	intervalMinutes: 15,
 	staleMinutes: STALE_MINUTES,
 	repeatMinutes: 60,
+	waitMinutes: WAIT_MINUTES,
 };
 
-/** 每条单上次提醒时的等待阶段与时刻：阶段没变、又没到 repeat，就不重复提 */
-export type WatchState = Record<string, { since: string; at: number }>;
+/**
+ * 每条单上次提醒时的等待阶段、提醒理由与时刻。
+ * 阶段或理由变了就重开一轮提醒——估算从 80% 走到 100% 是两条信息，不该被 repeat 压掉。
+ */
+export type WatchState = Record<string, { since: string; at: number; reason?: WatchReason }>;
+
+/** 提醒理由：不只催进度，也报等太久与估算将到 */
+export type WatchReason = "stall" | "wait" | "estimate-warn" | "estimate-over";
 
 /**
  * 本会话是不是这个角色的实例：owner 匹配 owner 与 owner-2。
@@ -98,7 +115,7 @@ function applyConfig(target: WatchConfig, source: Record<string, unknown>, file:
 		if (typeof source.followRole === "string") target.followRole = source.followRole.trim();
 		else problems.push(`${file}：workOrders.followRole 要写角色名字符串，这一项被忽略`);
 	}
-	for (const key of ["intervalMinutes", "staleMinutes", "repeatMinutes"] as const) {
+	for (const key of ["intervalMinutes", "staleMinutes", "repeatMinutes", "waitMinutes"] as const) {
 		const value = source[key];
 		if (value === undefined) continue;
 		if (typeof value === "number" && Number.isFinite(value) && value > 0) target[key] = value;
@@ -107,8 +124,72 @@ function applyConfig(target: WatchConfig, source: Record<string, unknown>, file:
 }
 
 /**
- * 这一轮该提什么。空串就是不提——库里没有停滞的单，或者该提的刚才提过。
- * state 只记「这条单在等什么阶段、上次什么时候提的」：阶段一变（进了新状态）就重开一轮提醒。
+ * 一条被提上来的单：等它在等人的位置（Waiting），加上这次为什么提。
+ * 同一个理由下一轮还在就按 repeat 压；理由变了（80% → 100%）立刻提。
+ */
+export interface WatchDue {
+	waiting: Waiting;
+	reason: WatchReason;
+	/** 这条理由下的一句话说明，如「估算已用 82%，还剩 40m」 */
+	detail: string;
+}
+
+/** 理由的紧迫度：同一条单命中多条时留最该说的那条 */
+const REASON_RANK: Record<WatchReason, number> = {
+	"estimate-over": 3,
+	stall: 2,
+	wait: 1,
+	"estimate-warn": 0,
+};
+
+/**
+ * 这一轮该提什么单。三类分开收，同一条单只留最紧迫的理由：
+ * 停滞（有人该动却没动）、等依赖超阈值（谁都没错，但连续着要报）、估算到 80% / 100%。
+ */
+export function collectDue(db: DatabaseSync, config: WatchConfig, now = Date.now()): WatchDue[] {
+	const picked = new Map<string, WatchDue>();
+	const put = (item: WatchDue) => {
+		if ((picked.get(item.waiting.order.id)?.reason ?? null) === null) {
+			picked.set(item.waiting.order.id, item);
+			return;
+		}
+		const current = picked.get(item.waiting.order.id)!;
+		if (REASON_RANK[item.reason] > REASON_RANK[current.reason]) picked.set(item.waiting.order.id, item);
+	};
+
+	for (const waiting of staleWaiting(db, config.staleMinutes, undefined, now)) {
+		put({ waiting, reason: "stall", detail: `停滞超 ${config.staleMinutes}m` });
+	}
+
+	for (const order of listOrders(db)) {
+		const estimate = estimateStatus(db, order, now);
+		if (estimate.level === "warn" || estimate.level === "over") {
+			const waiting: Waiting = { order, kind: "action", dependencies: [], since: order.updatedAt };
+			const detail =
+				estimate.level === "over"
+					? `估算已过 100%，超 ${formatAgo(-(estimate.remainMin ?? 0))}`
+					: `估算已用 ${Math.round((estimate.ratio ?? 0) * 100)}%，还剩 ${formatAgo(estimate.remainMin ?? 0)}`;
+			put({
+				waiting,
+				reason: estimate.level === "over" ? "estimate-over" : "estimate-warn",
+				detail,
+			});
+		}
+	}
+
+	for (const waiting of waitingOrders(db)) {
+		if (waiting.kind !== "dependency") continue;
+		const waited = dependencyWaitMinutes(db, waiting.order, now);
+		if (waited < config.waitMinutes) continue;
+		put({ waiting, reason: "wait", detail: `等依赖已 ${formatAgo(waited)}` });
+	}
+
+	return [...picked.values()].sort((a, b) => Date.parse(a.waiting.since) - Date.parse(b.waiting.since));
+}
+
+/**
+ * 这一轮该提的文本。空串就是不提——库里没有该提的单，或者该提的刚才提过。
+ * state 只记「这条单在等什么阶段、因为什么提的、上次什么时候提的」。
  */
 export function buildWatchText(
 	db: DatabaseSync,
@@ -116,17 +197,18 @@ export function buildWatchText(
 ): { text: string; state: WatchState } {
 	const now = options.now ?? Date.now();
 	const repeatMs = options.config.repeatMinutes * 60_000;
-	const stale = staleWaiting(db, options.config.staleMinutes, undefined, now);
 	const state: WatchState = {};
-	const due: Waiting[] = [];
+	const due: WatchDue[] = [];
 
-	for (const item of stale) {
-		const last = options.state?.[item.order.id];
-		if (!last || last.since !== item.since || now - last.at >= repeatMs) {
-			state[item.order.id] = { since: item.since, at: now };
+	for (const item of collectDue(db, options.config, now)) {
+		const id = item.waiting.order.id;
+		const last = options.state?.[id];
+		const changed = !last || last.since !== item.waiting.since || last.reason !== item.reason;
+		if (changed || now - last.at >= repeatMs) {
+			state[id] = { since: item.waiting.since, at: now, reason: item.reason };
 			due.push(item);
 		} else {
-			state[item.order.id] = last;
+			state[id] = last;
 		}
 	}
 	if (!due.length) return { text: "", state };
@@ -136,12 +218,19 @@ export function buildWatchText(
 /** 一个角色名下最多列几条：提醒要短，列不下就说还有多少 */
 const MAX_LINES = 5;
 
-function renderNote(due: Waiting[], me: string, config: WatchConfig, now: number): string {
+function renderNote(due: WatchDue[], me: string, config: WatchConfig, now: number): string {
+	const counts = new Map<WatchReason, number>();
+	for (const item of due) counts.set(item.reason, (counts.get(item.reason) ?? 0) + 1);
+	const parts = [...counts.entries()].map(([reason, n]) => `${REASON_LABEL[reason]} ${n} 条`);
 	const lines = [
-		`【工单台账 · 定时提醒】这轮 ${due.length} 条停滞单（每 ${config.intervalMinutes}m 自查，等超 ${config.staleMinutes}m 即提醒）`,
+		`【工单台账 · 定时提醒】这轮 ${due.length} 条（每 ${config.intervalMinutes}m 自查）：${parts.join("、")}`,
 	];
 	// 等这个角色自己的排最前：那是它该动的；排在后面的是别人的，可以改派
-	const groups = groupByActor(due).sort((a, b) => Number(b.actor === me) - Number(a.actor === me));
+	const groups = groupByActor(due.map((d) => d.waiting)).sort(
+		(a, b) => Number(b.actor === me) - Number(a.actor === me),
+	);
+	const detailOf = new Map(due.map((d) => [d.waiting.order.id, d.detail]));
+	const reasonOf = new Map(due.map((d) => [d.waiting.order.id, d.reason]));
 	for (const group of groups) {
 		const items = [...group.items].sort((a, b) => Date.parse(a.since) - Date.parse(b.since));
 		const who = isHumanActor(group.actor)
@@ -150,11 +239,27 @@ function renderNote(due: Waiting[], me: string, config: WatchConfig, now: number
 				? `等你动的 ${items.length} 条：`
 				: `等 ${group.actor} 的 ${items.length} 条：`;
 		lines.push(who);
-		for (const item of items.slice(0, MAX_LINES)) lines.push(`  ${formatWaitingLine(item, now)}`);
+		for (const item of items.slice(0, MAX_LINES)) {
+			const detail = detailOf.get(item.order.id);
+			const reason = reasonOf.get(item.order.id);
+			const line =
+				reason === "estimate-warn" || reason === "estimate-over"
+					? formatEstimateLine(item)
+					: formatWaitingLine(item, now);
+			lines.push(`  ${line}${detail ? `｜${detail}` : ""}`);
+		}
 		if (items.length > MAX_LINES) lines.push(`  ……另有 ${items.length - MAX_LINES} 条，用 orders_list 看全`);
 	}
 	lines.push(
-		"下一步：orders_show(id=…) 读正文；接不下的改派给别的角色（orders_update 的 nextActors），收口要带终止依据。",
+		"这一步只报读数，不是催进度：估算到了就复核估算，等依赖太久就查前置进度或改派（orders_update 的 nextActors）。",
+		"下一步：orders_show(id=…) 读正文；收口要带终止依据。",
 	);
 	return lines.join("\n");
 }
+
+const REASON_LABEL: Record<WatchReason, string> = {
+	stall: "停滞",
+	wait: "等依赖超时",
+	"estimate-warn": "估算将到",
+	"estimate-over": "估算超期",
+};

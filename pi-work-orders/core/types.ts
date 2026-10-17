@@ -61,6 +61,46 @@ export const WAITING_ROLES: readonly StateRole[] = ["claimable", "rework", "revi
 /** 催办阈值（分钟）：等超过这个时长还没动，就算停滞，进提醒与扫描 */
 export const STALE_MINUTES = 30;
 
+/** 估算进度提醒的预警比例：过了预估墙钟的这个比例就提醒，不等超期才知道 */
+export const ESTIMATE_WARN_RATIO = 0.8;
+
+/** 等依赖超过这个分钟数就提醒（与「停滞」分开：等依赖不是谁没干活） */
+export const WAIT_MINUTES = 120;
+
+/** 工期：预估与实际都给「主动工时」与「墙钟」两个口径，差值就是被等待吃掉的部分 */
+export interface Effort {
+	/** 主动工时（分钟）：人在干的时间 */
+	activeMin: number | null;
+	/** 墙钟（分钟）：从开工到收尾的自然时间，含等待 */
+	wallMin: number | null;
+}
+
+export type EstimateLevel = "none" | "ok" | "warn" | "over";
+
+export interface EstimateStatus {
+	level: EstimateLevel;
+	/** 已用 / 预估墙钟；没有预估就是 null */
+	ratio: number | null;
+	/** 还剩多少分钟；超期时为负 */
+	remainMin: number | null;
+}
+
+/** 交付偏差：实际减预估，只做减法不判断好坏 */
+export interface DeliveryDeviation {
+	/** 墙钟偏差（分钟）：实际 - 预估；缺一边就是 null */
+	wallMin: number | null;
+	/** 主动工时偏差（分钟） */
+	activeMin: number | null;
+	/** 等待占用的分钟数：优先取交付时填的 actualWaitMin，没填才用「墙钟 - 主动工时」推 */
+	waitMin: number | null;
+}
+
+/** 估算：开工前给的数，附评估依据与不确定性 */
+export interface Estimate extends Effort {
+	/** 为什么是这个数、哪些地方不确定 */
+	basis: string | null;
+}
+
 /**
  * 人工执行者的名字：等的是坐在终端前的人，不是会话。
  * 这类单没有 peer 可投（找不到叫「用户」的会话），只能走通知，不能当投递失败。
@@ -96,7 +136,7 @@ export interface OrderContent {
 export interface Order {
 	id: string;
 	title: string;
-	/** 正文，markdown 文本；范围修订用追加，不覆盖 */
+	/** 正文，markdown 文本；**以当前有效口径为准**，范围修订直接覆盖（旧内容留在 events 的理由里） */
 	body: string;
 	contents: OrderContent[];
 	/** 当前状态名（取值为项目声明的状态集之一） */
@@ -105,6 +145,16 @@ export interface Order {
 	nextActors: string[];
 	/** 终止依据：结单填证据指针，取消填理由或取代它的单号 */
 	closingBasis: string | null;
+	/** 开工前的估算；没估就是 null（不强制，缺了就只是没有进度提醒） */
+	estimate: Estimate;
+	/** 交付时的实际；未交付都是 null */
+	actual: Effort;
+	/** 等待依赖占用的分钟数，交付时填；不给就按依赖解锁事件推 */
+	actualWaitMin: number | null;
+	/** 偏差原因：实际与估算差在哪 */
+	deliveryVariance: string | null;
+	/** 可按占位继续的依据；空表示不可，必须等前置收口 */
+	placeholderBasis: string | null;
 	createdAt: string;
 	updatedAt: string;
 	/** 乐观锁版本号，防同一秒内的并发覆盖 */
@@ -158,6 +208,10 @@ export interface CreateInput {
 	/** 初始状态的角色，默认 claimable */
 	role?: StateRole;
 	dependsOn?: string[];
+	/** 开工前的估算（主动工时 / 墙钟 / 依据） */
+	estimate?: Partial<Estimate>;
+	/** 可按占位继续的依据 */
+	placeholderBasis?: string;
 }
 
 export interface UpdateInput {
@@ -172,6 +226,13 @@ export interface UpdateInput {
 	/** 替换完整内容入口列表；省略保留，空数组清空。 */
 	contents?: OrderContent[];
 	closingBasis?: string;
+	/** 改写或补估：只传给出的字段，其余保留 */
+	estimate?: Partial<Estimate>;
+	/** 交付时回填的实际工时 */
+	actual?: Partial<Effort>;
+	actualWaitMin?: number | null;
+	deliveryVariance?: string | null;
+	placeholderBasis?: string | null;
 }
 
 export interface ListFilter {

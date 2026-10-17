@@ -245,7 +245,22 @@ test("v3 升级仅加空入口，正文、状态、依赖、事件及版本号�
 	const up = createOrder(db, { title: "上游", nextActors: ["dev"] }, actor);
 	const down = createOrder(db, { title: "旧数据", body: "原正文", nextActors: ["qa"], dependsOn: [up.id] }, actor);
 	const history = eventsOf(db, down.id);
-	db.exec("ALTER TABLE orders DROP COLUMN contents; PRAGMA user_version=3;");
+	// 退回 v3 结构：只保留 v3 之前的列。新增列要一并退掉，
+	// 否则之后的 ADD COLUMN 会撞上已存在的列。
+	db.exec("ALTER TABLE orders DROP COLUMN contents;");
+	for (const column of [
+		"estimate_active_min",
+		"estimate_wall_min",
+		"estimate_basis",
+		"actual_active_min",
+		"actual_wall_min",
+		"actual_wait_min",
+		"delivery_variance",
+		"placeholder_basis",
+	]) {
+		db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
+	}
+	db.exec("PRAGMA user_version=3;");
 	db.close();
 	assert.throws(() => openLedger(file, true), /只读/);
 	const reopened = openLedger(file);

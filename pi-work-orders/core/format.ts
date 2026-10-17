@@ -4,9 +4,9 @@
  * 目标是一眼能扫：谁的活、卡在哪、下一步找谁。细节靠 orders_show。
  */
 
-import type { ListedOrder, OrderEvent, OrderView, Waiting } from "./types.ts";
+import type { DeliveryDeviation, ListedOrder, OrderEvent, OrderView, Waiting } from "./types.ts";
 
-function short(text: string, max = 60): string {
+export function short(text: string, max = 60): string {
 	const one = text.replace(/\s+/g, " ").trim();
 	return one.length > max ? `${one.slice(0, max - 1)}…` : one;
 }
@@ -30,6 +30,14 @@ export function formatAgo(minutes: number): string {
 	if (minutes < 60) return `${Math.round(minutes)}m`;
 	if (minutes < 24 * 60) return `${(minutes / 60).toFixed(1)}h`;
 	return `${(minutes / 1440).toFixed(1)}d`;
+}
+
+/** 工期写法：带符号的偏差用这个，正数加 +，让人一眼看出多还是少 */
+export function formatDelta(minutes: number): string {
+	const body = formatAgo(Math.abs(minutes));
+	if (minutes > 0) return `+${body}`;
+	if (minutes < 0) return `-${body}`;
+	return "±0m";
 }
 
 /** 有序候选：第一个是首选，其余是备选 */
@@ -56,7 +64,38 @@ export function formatList(orders: ListedOrder[], heading?: string, waiting: Wai
 	return heading ? `${heading}（${orders.length} 条）\n${body}` : body;
 }
 
-export function formatOrder(view: OrderView): string {
+/**
+ * 工期三行：估算、实际、偏差。缺哪块就省哪块——没估的单不该刷出空行，
+ * 估了没收口的单要让读的人看到「还剩多少、已经过了几成」。
+ */
+function formatEffort(view: OrderView, deviation?: DeliveryDeviation): string[] {
+	const lines: string[] = [];
+	const est = view.estimate;
+	if (est.activeMin != null || est.wallMin != null) {
+		const parts: string[] = [];
+		if (est.activeMin != null) parts.push(`主动 ${formatAgo(est.activeMin)}`);
+		if (est.wallMin != null) parts.push(`墙钟 ${formatAgo(est.wallMin)}`);
+		const basis = est.basis ? `（依据：${short(est.basis, 80)}）` : "";
+		lines.push(`估算：${parts.join(" / ")}${basis}`);
+	}
+	const act = view.actual;
+	if (act.activeMin != null || act.wallMin != null) {
+		const parts: string[] = [];
+		if (act.activeMin != null) parts.push(`主动 ${formatAgo(act.activeMin)}`);
+		if (act.wallMin != null) parts.push(`墙钟 ${formatAgo(act.wallMin)}`);
+		if (view.actualWaitMin != null) parts.push(`等依赖 ${formatAgo(view.actualWaitMin)}`);
+		const deltas: string[] = [];
+		if (deviation?.wallMin != null) deltas.push(`墙钟 ${formatDelta(deviation.wallMin)}`);
+		if (deviation?.activeMin != null) deltas.push(`主动 ${formatDelta(deviation.activeMin)}`);
+		const tail = deltas.length ? `｜偏差：${deltas.join(" / ")}` : "";
+		lines.push(`实际：${parts.join(" / ")}${tail}`);
+	}
+	if (view.deliveryVariance) lines.push(`偏差原因：${short(view.deliveryVariance, 120)}`);
+	if (view.placeholderBasis) lines.push(`可按占位继续：${short(view.placeholderBasis, 120)}`);
+	return lines;
+}
+
+export function formatOrder(view: OrderView, extra: { deviation?: DeliveryDeviation } = {}): string {
 	const lines: string[] = [];
 	lines.push(`${view.id}｜${view.title}`);
 	lines.push(`状态：${view.state}｜下一步找谁：${formatActors(view.nextActors)}`);
@@ -65,6 +104,8 @@ export function formatOrder(view: OrderView): string {
 		lines.push(`依赖：${view.dependsOn.join(", ")}${stale}`);
 	}
 	if (view.blocks.length) lines.push(`下游：${view.blocks.join(", ")}`);
+	const effort = formatEffort(view, extra.deviation);
+	if (effort.length) lines.push(...effort);
 	if (view.closingBasis) lines.push(`终止依据：${view.closingBasis}`);
 	lines.push(
 		`时间：建于 ${view.createdAt.slice(0, 16).replace("T", " ")}｜改于 ${view.updatedAt.slice(0, 16).replace("T", " ")}｜rev ${view.revision}`,

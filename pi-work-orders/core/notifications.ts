@@ -79,7 +79,9 @@ export function handoffSnapshot(ledger: DatabaseSync): Handoff[] {
 					id,
 					orderId: order.id,
 					targets,
-					text: `【工单交接 ${order.id}】${order.title}\n状态：${order.state}；下一步：${order.nextActors.join("、")}\n请先用 orders_show 核实现状，再认领或处理；收到通知不等于已认领。`,
+					// 只带定位与「去读哪」：正文与现场（依赖、上游产物、能否占位）都在 orders_show，
+					// 塞进通知会让同一份内容两处存在，且随现场变化反复重发。
+					text: `【工单交接 ${order.id}】${order.title}\n状态：${order.state}；下一步：${order.nextActors.join("、")}\n请先用 orders_show 核实现状（含当前依赖、上游产物、能否占位、是否需重读），再认领或处理；收到通知不等于已认领。`,
 				},
 			];
 		});
