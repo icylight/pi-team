@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-
 import { buildDispatchBrief, formatDispatchBrief } from "../core/digest.ts";
-import { initLedger, openLedger } from "../core/schema.ts";
+import { initLedger, openLedger, SCHEMA_VERSION } from "../core/schema.ts";
 import {
 	createOrder,
 	deliveryDeviation,
@@ -26,6 +26,23 @@ function agingEvent(db, orderId, minutes) {
 		`-${minutes} minutes`,
 		orderId,
 	);
+}
+
+/** 退回 v4 结构：v5 的工序列要整批退掉，否则升级时 ADD COLUMN 会撞已存在的列 */
+const V5_COLUMNS = [
+	"estimate_active_min",
+	"estimate_wall_min",
+	"estimate_basis",
+	"actual_active_min",
+	"actual_wall_min",
+	"actual_wait_min",
+	"delivery_variance",
+	"placeholder_basis",
+];
+
+function downgradeToV4(db) {
+	for (const column of V5_COLUMNS) db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
+	db.exec("PRAGMA user_version=4;");
 }
 
 function freshLedger() {
@@ -360,19 +377,7 @@ test("appendBody 仍可补小段，且与覆写互不干扰", () => {
 test("v4 的库升级后能读能写估算字段", () => {
 	const { db, dbPath } = freshLedger();
 	const o = createOrder(db, { title: "老数据", nextActors: ["dev"], estimate: { wallMin: 60 } }, owner);
-	for (const column of [
-		"estimate_active_min",
-		"estimate_wall_min",
-		"estimate_basis",
-		"actual_active_min",
-		"actual_wall_min",
-		"actual_wait_min",
-		"delivery_variance",
-		"placeholder_basis",
-	]) {
-		db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
-	}
-	db.exec("PRAGMA user_version=4;");
+	downgradeToV4(db);
 	db.close();
 
 	const reopened = openLedger(dbPath);
@@ -380,5 +385,41 @@ test("v4 的库升级后能读能写估算字段", () => {
 	assert.equal(upgraded.estimate.wallMin, null, "旧数据没有估算，不编一个");
 	const patched = updateOrder(reopened, o.id, { estimate: { wallMin: 90 } }, owner);
 	assert.equal(patched.estimate.wallMin, 90, "升级后能写新字段");
+	reopened.close();
+});
+
+// ── 升级开关：多会话共享库时不被自动升级拖走 ──────────
+
+test("PI_WORK_ORDERS_NO_MIGRATE=1：版本不匹配只报错，不写库", () => {
+	const { db, dbPath } = freshLedger();
+	createOrder(db, { title: "老数据", nextActors: ["dev"] }, owner);
+	downgradeToV4(db);
+	db.close();
+
+	process.env.PI_WORK_ORDERS_NO_MIGRATE = "1";
+	try {
+		assert.throws(() => openLedger(dbPath), /已设 PI_WORK_ORDERS_NO_MIGRATE，不自动升级/);
+		// 库必须还是 4：拒绝不等于静默升完再报错
+		const probe = new DatabaseSync(dbPath);
+		assert.equal(probe.prepare("PRAGMA user_version").get().user_version, 4);
+		probe.close();
+	} finally {
+		delete process.env.PI_WORK_ORDERS_NO_MIGRATE;
+	}
+
+	// 放开之后能正常升级
+	const reopened = openLedger(dbPath);
+	assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
+	reopened.close();
+});
+
+test("默认仍自动升级：不设变量时行为不变", () => {
+	const { db, dbPath } = freshLedger();
+	createOrder(db, { title: "老数据", nextActors: ["dev"] }, owner);
+	downgradeToV4(db);
+	db.close();
+
+	const reopened = openLedger(dbPath);
+	assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
 	reopened.close();
 });

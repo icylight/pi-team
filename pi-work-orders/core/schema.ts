@@ -116,6 +116,18 @@ export function defaultDbPath(cwd: string): string {
 	return path.join(cwd, DEFAULT_DB_DIR, DEFAULT_DB_NAME);
 }
 
+/**
+ * 是否禁止自动升级。默认允许——单会话用库时自动升级最省事。
+ *
+ * 多会话共享同一个库时，自动升级是个陷阱：谁先拿到新版代码打开库，升级就在那一刻发生，
+ * 其他还跑旧代码的会话随即被锁在外面（它们会报「库版本比工具新」）。这时把
+ * `PI_WORK_ORDERS_NO_MIGRATE=1` 设上：库版本不匹配就只报错，不写库，等所有会话都换到新版再放开。
+ */
+function migrationDisabled(): boolean {
+	const raw = process.env.PI_WORK_ORDERS_NO_MIGRATE?.trim().toLowerCase();
+	return raw === "1" || raw === "true" || raw === "yes";
+}
+
 export function openLedger(dbPath: string, readOnly = false): DatabaseSync {
 	if (!fs.existsSync(dbPath)) {
 		throw new LedgerError(`工单库不存在：${dbPath}（先跑 orders_init 建库）`);
@@ -126,6 +138,13 @@ export function openLedger(dbPath: string, readOnly = false): DatabaseSync {
 	const version = db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
 	const found = version?.user_version ?? 0;
 	if (found !== SCHEMA_VERSION) {
+		if (migrationDisabled() && found < SCHEMA_VERSION) {
+			db.close();
+			throw new LedgerError(
+				`库版本 ${found}、工具 ${SCHEMA_VERSION}，但已设 PI_WORK_ORDERS_NO_MIGRATE，不自动升级。` +
+					`确认同库的其他会话都换了新版后，不设这个变量再打开一次即可完成升级。`,
+			);
+		}
 		try {
 			migrate(db, found, readOnly);
 		} catch (error) {
