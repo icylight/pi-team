@@ -402,11 +402,113 @@ describe("消息投递", () => {
 });
 
 describe("会话 key", () => {
-	it("每次生成都不同且格式合法", () => {
+	it("没有稳定种子时每次生成都不同且格式合法", () => {
 		const a = newSessionKey();
 		const b = newSessionKey();
 		assert.notEqual(a, b);
 		assert.ok(/^\d+-[0-9a-f]{4}$/.test(a));
+	});
+
+	it("给了稳定种子就稳定：同一会话 reload 不换 key，收件箱不分裂", () => {
+		const a = newSessionKey(9001, "session-id-abc");
+		const b = newSessionKey(9001, "session-id-abc");
+		assert.equal(a, b);
+		assert.ok(/^9001-[0-9a-f]{4}$/.test(a));
+		// 不同会话不同 key，不同进程同一会话也会变（pid 参与了）
+		assert.notEqual(a, newSessionKey(9001, "session-id-xyz"));
+		assert.notEqual(a, newSessionKey(9002, "session-id-abc"));
+	});
+});
+
+describe("收件箱跨 key 聚合", () => {
+	/** 造一条已投递消息：直接写进 delivered/<key>/ 下 */
+	function deliver(store: PeerStore, to: string, msg: PeerMessage, at: number): void {
+		const dir = store.deliveredDir(to);
+		fs.mkdirSync(dir, { recursive: true });
+		const file = path.join(dir, `${String(at).padStart(16, "0")}-000-${msg.id}.json`);
+		fs.writeFileSync(file, JSON.stringify({ ...msg, to, ts: at }));
+	}
+
+	it("同一会话换了 key 之后，历史仍然查得到", () => {
+		const store = freshStore();
+		const oldKey = "7001-aaaa";
+		const newKey = "8002-bbbb";
+		store.ensure(oldKey);
+		store.ensure(newKey);
+		store.recordIdentity(oldKey, { sessionFile: "/s/x.jsonl", name: "dev" });
+		store.recordIdentity(newKey, { sessionFile: "/s/x.jsonl", name: "dev" });
+
+		deliver(
+			store,
+			oldKey,
+			{ id: "m1", from: "1-1", fromName: "owner", to: oldKey, text: "旧会话收到", ts: 1000 },
+			1000,
+		);
+		deliver(
+			store,
+			newKey,
+			{ id: "m2", from: "1-1", fromName: "owner", to: newKey, text: "新会话收到", ts: 2000 },
+			2000,
+		);
+
+		const all = store.historyBySession(newKey, { sessionFile: "/s/x.jsonl", limit: 10 });
+		assert.deepEqual(
+			all.map((m) => m.id),
+			["m2", "m1"],
+			"两个 key 的消息都要在，新→旧",
+		);
+
+		// 只看当前 key 时只剩一条
+		assert.deepEqual(
+			store.historyBySession(newKey, { limit: 10, sessionFile: undefined }).map((m) => m.id),
+			["m2"],
+		);
+	});
+
+	it("别的会话不会混进来", () => {
+		const store = freshStore();
+		store.ensure("7001-aaaa");
+		store.ensure("9003-cccc");
+		store.recordIdentity("7001-aaaa", { sessionFile: "/s/mine.jsonl", name: "dev" });
+		store.recordIdentity("9003-cccc", { sessionFile: "/s/other.jsonl", name: "qa" });
+		deliver(store, "7001-aaaa", { id: "mine", from: "1-1", fromName: "owner", to: "7001-aaaa", text: "a", ts: 1 }, 1);
+		deliver(
+			store,
+			"9003-cccc",
+			{ id: "other", from: "1-1", fromName: "owner", to: "9003-cccc", text: "b", ts: 2 },
+			2,
+		);
+
+		const mine = store.historyBySession("7001-aaaa", { sessionFile: "/s/mine.jsonl", limit: 10 });
+		assert.deepEqual(
+			mine.map((m) => m.id),
+			["mine"],
+		);
+	});
+
+	it("since / until 按时间过滤：收件箱被单条淹掉时还能翻到", () => {
+		const store = freshStore();
+		store.ensure("7001-dddd");
+		store.recordIdentity("7001-dddd", { sessionFile: "/s/y.jsonl", name: "dev" });
+		for (let i = 0; i < 5; i += 1) {
+			deliver(
+				store,
+				"7001-dddd",
+				{ id: `m${i}`, from: "1-1", fromName: "owner", to: "7001-dddd", text: `第 ${i} 条`, ts: 1000 + i * 100 },
+				1000 + i * 100,
+			);
+		}
+		const window = store.historyBySession("7001-dddd", {
+			sessionFile: "/s/y.jsonl",
+			limit: 10,
+			since: 1200,
+			until: 1300,
+		});
+		assert.deepEqual(
+			window.map((m) => m.id),
+			["m3", "m2"],
+			"闭区间内两条",
+		);
 	});
 });
 
@@ -514,5 +616,41 @@ describe("专注模式：隐身的会话不让别人选到", () => {
 
 		assert.equal(a.resolveScoped("proj-b", "hidden-owner", "9400-1111").ok, false);
 		assert.equal(a.resolveScoped("proj-b", "hidden-owner", "9400-1111").candidates.length, 0);
+	});
+});
+
+describe("回填老 key 的身份", () => {
+	it("同一 pid 的多个 key 归成一组，聚合后能读全历史", () => {
+		const store = freshStore();
+		// 模拟老数据：同 pid 三个 key，每个目录各有消息，全部没有 identity 记录
+		for (const key of ["5001-aaaa", "5001-bbbb", "5001-cccc", "5002-dddd"]) {
+			store.ensure(key);
+			const dir = store.deliveredDir(key);
+			fs.writeFileSync(
+				path.join(dir, `${String(1).padStart(16, "0")}-000-m-${key}.json`),
+				JSON.stringify({ id: `m-${key}`, from: "1-1", fromName: "owner", to: key, text: key, ts: 1 }),
+			);
+		}
+
+		const changed = store.backfillIdentities();
+		assert.deepEqual(
+			changed.map((c) => c.key).sort(),
+			["5001-aaaa", "5001-bbbb", "5001-cccc"],
+			"只有一个 key 的 pid 不动",
+		);
+
+		const all = store.historyBySession("5001-cccc", { sessionFile: "pid:5001", limit: 10 });
+		assert.equal(all.length, 3, "同一会话的三个 key 要合起来");
+	});
+
+	it("已登记真实会话文件的不被覆盖", () => {
+		const store = freshStore();
+		store.ensure("6001-aaaa");
+		store.ensure("6001-bbbb");
+		store.recordIdentity("6001-aaaa", { sessionFile: "/s/real.jsonl", name: "dev" });
+
+		store.backfillIdentities();
+		const keys = store.keysOfSession("6001-bbbb", "/s/real.jsonl");
+		assert.ok(keys.includes("6001-aaaa"), "真实记录仍然可用");
 	});
 });

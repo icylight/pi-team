@@ -159,8 +159,21 @@ export function cwdKey(cwd: string): string {
 }
 
 /** 生成本次会话的 key（进程号 + 随机短串，避免 reload 后与旧记录撞车） */
-export function newSessionKey(pid = process.pid): string {
-	return `${pid}-${randomBytes(2).toString("hex")}`;
+/**
+ * 会话标识：`<pid>-<4 hex>`。
+ *
+ * 给了 stableSeed（通常是会话文件路径）就由它派生后缀：同一会话在同一进程里
+ * reload、切分支、重建扩展运行时都不换 key，收件箱目录也就不会一份历史散成几个。
+ * 没有 seed 时退回随机——还没落盘的空白会话属于这种情况。
+ *
+ * 跨进程仍然会变（pid 变了），所以「同一个会话的历史」不能只靠 key 找，
+ * 见 identity 账与 historyBySession。
+ */
+export function newSessionKey(pid = process.pid, stableSeed?: string): string {
+	const suffix = stableSeed
+		? createHash("sha256").update(stableSeed).digest("hex").slice(0, 4)
+		: randomBytes(2).toString("hex");
+	return `${pid}-${suffix}`;
 }
 
 /** 生成消息 id */
@@ -239,6 +252,129 @@ export class PeerStore {
 		for (const d of [this.membersDir, this.pendingDir(key), this.deliveredDir(key), this.outboxDir(key)]) {
 			fs.mkdirSync(d, { recursive: true, mode: DIR_MODE });
 		}
+	}
+
+	/**
+	 * key → 会话身份的账：`identities.json`，形如 `{ "<key>": { sessionFile, name, at } }`。
+	 *
+	 * 为什么需要它：key 含 pid，进程重启就换，而 `delivered/` 是按 key 建目录的。
+	 * 同一段对话的历史会散在几个目录里，只按当前 key 查就只剩最后一段。
+	 * 记下 sessionFile 之后，就能把同一会话的多个 key 聚合起来。
+	 */
+	private identityFile(): string {
+		return path.join(this.dir, "identities.json");
+	}
+
+	/** 记一次 key 与它的会话身份。同一 key 重复注册只刷新 name 与时间。 */
+	recordIdentity(key: string, info: { sessionFile?: string; name: string }): void {
+		assertKey(key);
+		const all = this.readIdentities();
+		all[key] = { sessionFile: info.sessionFile, name: info.name, at: Date.now() };
+		this.writeIdentities(all);
+	}
+
+	private readIdentities(): Record<string, { sessionFile?: string; name: string; at: number }> {
+		const file = this.identityFile();
+		try {
+			const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+			return parsed as Record<string, { sessionFile?: string; name: string; at: number }>;
+		} catch {
+			return {};
+		}
+	}
+
+	private writeIdentities(all: Record<string, { sessionFile?: string; name: string; at: number }>): void {
+		fs.mkdirSync(this.dir, { recursive: true, mode: DIR_MODE });
+		// writeAtomic 自己会序列化：这里传对象，传字符串会被双重编码成 ""{...}""
+		writeAtomic(this.identityFile(), all);
+	}
+
+	/**
+	 * 同一段对话用过的所有 key：sessionFile 相同的就是同一会话。
+	 * 没给 sessionFile 时退回 `[key]`——不知道归属，只能查当前这一份。
+	 */
+	keysOfSession(key: string, sessionFile?: string): string[] {
+		const all = this.readIdentities();
+		const keys = new Set<string>([key]);
+		if (sessionFile) {
+			for (const [k, info] of Object.entries(all)) {
+				if (info.sessionFile === sessionFile) keys.add(k);
+			}
+		}
+		return [...keys].filter((k) => KEY_RE.test(k));
+	}
+
+	/**
+	 * 跨 key 的已投递历史（新→旧）：把同一会话散在多个目录里的消息合起来。
+	 * since / until 是毫秒时间戳，给收件箱被单条内容淹掉之后留一条按时间翻的路。
+	 */
+	historyBySession(
+		key: string,
+		options: { sessionFile?: string; limit?: number; since?: number; until?: number } = {},
+	): PeerMessage[] {
+		const limit = Math.max(1, options.limit ?? 20);
+		const seen = new Set<string>();
+		const out: PeerMessage[] = [];
+		for (const k of this.keysOfSession(key, options.sessionFile)) {
+			let files: string[];
+			try {
+				files = fs.readdirSync(this.deliveredDir(k)).filter((f) => f.endsWith(".json"));
+			} catch {
+				continue;
+			}
+			for (const f of files) {
+				const msg = readJson<PeerMessage>(path.join(this.deliveredDir(k), f));
+				if (!msg || typeof msg.id !== "string" || seen.has(msg.id)) continue;
+				if (options.since != null && msg.ts < options.since) continue;
+				if (options.until != null && msg.ts > options.until) continue;
+				seen.add(msg.id);
+				out.push(msg);
+			}
+		}
+		return out.sort((a, b) => b.ts - a.ts).slice(0, limit);
+	}
+
+	/**
+	 * 回填老 key 的身份：同一个 pid 出现多个 key，说明同一进程反复重建会话运行时。
+	 * 这些 key 属于同一段对话，但早期版本没记 sessionFile，只能按 pid 归组。
+	 *
+	 * 归组后的 sessionFile 写成 `pid:<pid>` 这种标记，只为让 `keysOfSession` 能把它们聚到一起，
+	 * 不代表真实文件。已有 sessionFile 的 key 不动。
+	 *
+	 * 返回改了哪些 key，空数组表示没有可回填的。
+	 */
+	backfillIdentities(): { key: string; group: string }[] {
+		const all = this.readIdentities();
+		const byPid = new Map<string, string[]>();
+		let keys: string[] = [];
+		try {
+			keys = fs.readdirSync(path.join(this.dir, "delivered"));
+		} catch {
+			return [];
+		}
+		for (const key of keys) {
+			if (!KEY_RE.test(key)) continue;
+			const pid = key.split("-")[0];
+			if (!pid) continue;
+			const list = byPid.get(pid) ?? [];
+			list.push(key);
+			byPid.set(pid, list);
+		}
+		const changed: { key: string; group: string }[] = [];
+		for (const [pid, group] of byPid) {
+			if (group.length < 2) continue;
+			const groupTag = `pid:${pid}`;
+			for (const key of group) {
+				const known = all[key];
+				// 已登记真实会话文件的保持原样：那是更可靠的归属
+				if (known?.sessionFile && !known.sessionFile.startsWith("pid:")) continue;
+				all[key] = { sessionFile: groupTag, name: known?.name ?? `会话 ${pid}`, at: known?.at ?? Date.now() };
+				changed.push({ key, group: groupTag });
+			}
+		}
+		if (changed.length) this.writeIdentities(all);
+		return changed;
 	}
 
 	/** 认领角色实例名：第一个用基础角色，后续追加 -2、-3…… */

@@ -305,7 +305,11 @@ export default function (pi: ExtensionAPI) {
 			if (details?.from && details.fromName) ensureMessageRenderer(entry.customType);
 		}
 
-		const key = newSessionKey();
+		// 会话身份当稳定种子：同一会话内 reload 不换 key，收件箱不会分裂成多份。
+		// 旧版 pi 的 sessionManager 没有 getSessionId，退回会话文件路径；两者都没有时随机。
+		const session = ctx.sessionManager as { getSessionId?: () => string; getSessionFile: () => string | undefined };
+		const stableSeed = session.getSessionId?.() || session.getSessionFile();
+		const key = newSessionKey(process.pid, stableSeed);
 		const restoredRole = restoreRole(ctx);
 		// 远程新会话保留目标当前角色，优先于进程最初启动时指定的角色。
 		const remoteSession = ctx.sessionManager
@@ -393,6 +397,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		store.ensure(key);
+		store.recordIdentity(key, { sessionFile: self.sessionFile, name: self.name });
 		store.register(self);
 
 		// 收件箱监听：fs.watch 负责实时，轮询兜底（某些文件系统 watch 不可靠）
@@ -738,16 +743,37 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "peer_inbox",
 		label: "Peer Inbox",
-		description: "查看我收到的历史 peer 消息（新→旧），用于回溯对方说过什么。",
+		description:
+			"查看我收到的历史 peer 消息（新→旧），用于回溯对方说过什么。默认按整段对话聚合：同一会话重启过的历史一起给出，不只看本次进程。",
 		promptSnippet: "查看收到的 peer 消息历史",
 		parameters: Type.Object({
 			limit: Type.Optional(Type.Number({ description: "条数，默认 10，最多 50" })),
+			since: Type.Optional(
+				Type.String({ description: "只看此刻之后的消息：HH:MM 或 ISO 时间；当收件箱被某一条淹掉时按时间翻" }),
+			),
+			until: Type.Optional(Type.String({ description: "只看此刻之前的消息：HH:MM 或 ISO 时间" })),
+			currentSessionOnly: Type.Optional(
+				Type.Boolean({ description: "只看本次进程收到的（默认 false：按整段对话聚合）" }),
+			),
 		}),
 		async execute(_toolCallId, params) {
 			if (!store || !self) return text("pi-peer 未启用（未注册成功）");
 			const limit = Math.min(50, Math.max(1, Math.floor(params.limit ?? 10)));
-			const items = store.history(self.key, limit);
-			if (items.length === 0) return text("还没有收到过 peer 消息。");
+			const since = parseInboxTime(params.since);
+			const until = parseInboxTime(params.until);
+			if (params.since && since == null)
+				return text(`看不出来 since=${params.since} 指哪个时刻，用 HH:MM 或 ISO 时间`);
+			if (params.until && until == null)
+				return text(`看不出来 until=${params.until} 指哪个时刻，用 HH:MM 或 ISO 时间`);
+			const items = store
+				.historyBySession(self.key, {
+					sessionFile: params.currentSessionOnly ? undefined : self.sessionFile,
+					limit: params.currentSessionOnly ? limit : Math.max(limit, 50),
+					since: since ?? undefined,
+					until: until ?? undefined,
+				})
+				.slice(0, limit);
+			if (items.length === 0) return text("还没有收到过 peer 消息（给定的时间范围内也没有）。");
 			const lines = items.map((m) => {
 				const ago = Math.round((Date.now() - m.ts) / 1000);
 				return `[${clockTime(m.ts)}] ${m.fromName}（${ago}s 前）id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
@@ -873,6 +899,38 @@ export default function (pi: ExtensionAPI) {
 				lines.push(`（另有 ${foreignAll.length} 个其他项目的在线会话，/peers all 看）`);
 			}
 			ctx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
+	pi.registerCommand("peer-inbox-repair", {
+		description: "把老会话散在多个 key 目录里的收件历史归组，之后 peer_inbox 能查全",
+		handler: async (_args, ctx) => {
+			if (!store || !self) {
+				ctx.ui.notify("pi-peer 未启用", "warning");
+				return;
+			}
+			try {
+				const before = store.historyBySession(self.key, { sessionFile: self.sessionFile, limit: 5000 }).length;
+				const changed = store.backfillIdentities();
+				const after = store.historyBySession(self.key, { sessionFile: self.sessionFile, limit: 5000 }).length;
+				if (!changed.length) {
+					ctx.ui.notify(`没有需要归组的老 key（当前收件历史 ${after} 条）`, "info");
+					return;
+				}
+				const groups = new Map<string, number>();
+				for (const item of changed) groups.set(item.group, (groups.get(item.group) ?? 0) + 1);
+				ctx.ui.notify(
+					[
+						`已归组 ${changed.length} 个老 key（分属 ${groups.size} 个会话）`,
+						`你自己的收件历史：${before} → ${after} 条`,
+						"归组依据是 pid：同一进程反复重载会换 key，这些 key 属同一段对话。",
+						"早期版本没记会话文件，所以只能按 pid 归组；今后新建的 key 会记真实会话文件。",
+					].join("\n"),
+					"info",
+				);
+			} catch (error) {
+				ctx.ui.notify(`归组失败：${(error as Error).message}`, "error");
+			}
 		},
 	});
 
@@ -1192,6 +1250,26 @@ function text(s: string) {
  * 不用 toLocaleTimeString()：它跟系统 locale 走，en-US 下会输出 8:40:30 PM，
  * 而各会话报文里的时刻一律 24 小时制，同一时刻两种写法会让人工对照串行。
  */
+/**
+ * 收件箱时间过滤参数：`HH:MM`（今天的本地时刻）、`HH:MM:SS`，或 ISO 字符串。
+ * 只给时刻时按今天算；已经过了的时分秒若在今天还没到，就理解成昨天——
+ * 收件箱回溯的多半是刚过去的时段，猜未来没有意义。
+ */
+function parseInboxTime(raw: string | undefined): number | null {
+	const value = raw?.trim();
+	if (!value) return null;
+	const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+	if (m) {
+		const now = new Date();
+		const at = new Date(now);
+		at.setHours(Number(m[1]), Number(m[2]), Number(m[3] ?? 0), 0);
+		if (at.getTime() > now.getTime()) at.setDate(at.getDate() - 1);
+		return at.getTime();
+	}
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
 function clockTime(ts: number): string {
 	const d = new Date(ts);
 	const p = (n: number) => String(n).padStart(2, "0");
