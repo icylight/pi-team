@@ -750,7 +750,7 @@ export default function (pi: ExtensionAPI) {
 			if (items.length === 0) return text("还没有收到过 peer 消息。");
 			const lines = items.map((m) => {
 				const ago = Math.round((Date.now() - m.ts) / 1000);
-				return `[${new Date(m.ts).toLocaleTimeString()}] ${m.fromName}（${ago}s 前）id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
+				return `[${clockTime(m.ts)}] ${m.fromName}（${ago}s 前）id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
 			});
 			return text(lines.join("\n"));
 		},
@@ -1185,6 +1185,17 @@ export default function (pi: ExtensionAPI) {
 
 function text(s: string) {
 	return { content: [{ type: "text" as const, text: s }], details: {} };
+}
+
+/**
+ * 本地时间 24 小时制 HH:MM:SS。
+ * 不用 toLocaleTimeString()：它跟系统 locale 走，en-US 下会输出 8:40:30 PM，
+ * 而各会话报文里的时刻一律 24 小时制，同一时刻两种写法会让人工对照串行。
+ */
+function clockTime(ts: number): string {
+	const d = new Date(ts);
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 function isValidRoleName(role: string): boolean {
