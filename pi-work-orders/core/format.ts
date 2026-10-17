@@ -135,7 +135,16 @@ export function formatHistory(events: OrderEvent[]): string {
 }
 
 export function formatWaitingReason(w: Waiting): string {
-	if (w.kind === "dependency") return `等依赖：${w.dependencies.map((dep) => `${dep.id} ${dep.state}`).join("、")}`;
+	if (w.kind === "dependency") {
+		const deps = w.dependencies.map((dep) => `${dep.id} ${dep.state}`).join("、");
+		// 换过依赖边时两个时长都要说：整段多久、当前这组多久。只报一个都会误导。
+		if (w.blockedSince && w.blockedSince !== w.since) {
+			const whole = Math.max(0, Math.round((Date.now() - Date.parse(w.blockedSince)) / 60_000));
+			const current = Math.max(0, Math.round((Date.now() - Date.parse(w.since)) / 60_000));
+			return `等依赖：${deps}｜整段 ${formatAgo(whole)}（当前这组 ${formatAgo(current)}）`;
+		}
+		return `等依赖：${deps}`;
+	}
 	if (w.kind === "decision")
 		return `上游已取消，需人工裁定：${w.dependencies
 			.filter((dep) => dep.cancelled)

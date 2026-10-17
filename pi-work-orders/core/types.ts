@@ -257,8 +257,19 @@ export interface Waiting {
 	order: Order;
 	kind: "action" | "dependency" | "decision";
 	dependencies: DependencyBlocker[];
-	/** 可处理起点；等依赖时仅记录状态进入时刻，不计催办。 */
+	/**
+	 * 可处理起点 / 等待判定的起点。
+	 *
+	 * 等依赖时它指「当前这组未完成前置开始的时刻」——换过依赖边就从边变过的那一刻算，
+	 * 不从头算。阈值告警用这个值：新的前置刚挂上就报「等了两小时」会催错人。
+	 */
 	since: string;
+	/**
+	 * 连续处于等依赖状态的起点（仅 kind=dependency 时有意义）。
+	 * 与 since 不同时，说明中途换过依赖边：since 指当前这组，blocked 指这一整段。
+	 * 只用于展示，不参与阈值判定。
+	 */
+	blockedSince?: string;
 }
 
 export interface ActorContext {

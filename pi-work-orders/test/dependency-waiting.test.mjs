@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { buildDigest, renderStale } from "../core/digest.ts";
-import { formatList, formatWaiting } from "../core/format.ts";
+import { formatList, formatWaiting, formatWaitingReason } from "../core/format.ts";
 import { initLedger, stateOf } from "../core/schema.ts";
 import {
 	addDep,
@@ -18,7 +18,7 @@ import {
 	updateOrder,
 	waitingOrders,
 } from "../core/store.ts";
-import { buildWatchText, WATCH_DEFAULTS } from "../core/watch.ts";
+import { buildWatchText, collectDue, WATCH_DEFAULTS } from "../core/watch.ts";
 
 const MINUTE = 60_000;
 const START = Date.parse("2026-01-01T00:00:00.000Z");
@@ -226,4 +226,59 @@ test("提醒按传入的 now 判阈值，边界未超过时不催", (t) => {
 		buildWatchText(db, { me: "owner", config: WATCH_DEFAULTS, now: START + 31 * MINUTE }).text,
 		new RegExp(down.id),
 	);
+});
+
+// ── 换依赖边：计时跟当前这组前置走 ──────────────────
+
+test("删旧加新换依赖：等依赖从新前置挂上算，同时保留整段时长", (t) => {
+	const { db, up, down } = fixture(t);
+	// 建单即依赖 up，等了 90 分钟
+	t.mock.timers.tick(90 * MINUTE);
+	// 换前置：删掉 up，换成另一条未完成前置
+	const other = createOrder(db, { title: "新前置", nextActors: ["qa"], role: "active" }, owner);
+	removeDep(db, down.id, up.id, owner);
+	addDep(db, down.id, other.id, owner);
+
+	const w = waiting(db, down.id);
+	assert.equal(w.kind, "dependency");
+	assert.equal(w.dependencies.length, 1);
+	assert.equal(w.dependencies[0].id, other.id);
+	// since 指向当前这组：换边那一刻，而不是建单时刻
+	assert.ok(Date.parse(w.since) >= Date.parse("2026-01-01T01:30:00.000Z"), `since 应是换边之后，实际 ${w.since}`);
+	// blockedSince 保留整段起点
+	assert.equal(w.blockedSince, "2026-01-01T00:00:00.000Z");
+
+	// 读数里两个时长都在
+	const reason = formatWaitingReason(w);
+	assert.match(reason, /整段/);
+	assert.match(reason, /当前这组/);
+});
+
+test("没换过依赖边时不出现两套时长", (t) => {
+	const { db, down } = fixture(t);
+	t.mock.timers.tick(90 * MINUTE);
+	const w = waiting(db, down.id);
+	assert.equal(w.kind, "dependency");
+	assert.equal(w.blockedSince, undefined, "没换边就不该有第二个起点");
+	assert.doesNotMatch(formatWaitingReason(w), /整段/);
+});
+
+test("换边后等依赖阈值重新起算：刚换上新前置的不会被当成等了两小时", (t) => {
+	const { db, up, down } = fixture(t);
+	t.mock.timers.tick(200 * MINUTE); // 远超 120m 阈值
+	const fresh = createOrder(db, { title: "新前置", nextActors: ["qa"], role: "active" }, owner);
+	removeDep(db, down.id, up.id, owner);
+	addDep(db, down.id, fresh.id, owner);
+
+	const due = collectDue(db, { ...WATCH_DEFAULTS, waitMinutes: 120 });
+	assert.ok(
+		!due.some((d) => d.waiting.order.id === down.id && d.reason === "wait"),
+		`刚换上的前置不该立刻报超时：${JSON.stringify(due.map((d) => [d.waiting.order.id, d.reason]))}`,
+	);
+
+	t.mock.timers.tick(130 * MINUTE); // 新前置也等久了，这时才该报
+	const later = collectDue(db, { ...WATCH_DEFAULTS, waitMinutes: 120 });
+	const hit = later.find((d) => d.waiting.order.id === down.id && d.reason === "wait");
+	assert.ok(hit, "等新前置超阈值后要报");
+	assert.match(hit.detail, /整段/);
 });

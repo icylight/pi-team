@@ -53,6 +53,32 @@ function releasedAt(db: DatabaseSync, order: Order, interval: Interval): string 
 	return interval.end?.at;
 }
 
+/**
+ * 当前这组未完成前置从何时开始挡着。
+ *
+ * 换依赖边（删旧加新）不该让「等了两小时」这样的读数继续指向旧前置：T406 的实测是
+ * 删 T414、加 T418 之后仍从建单算，报「等依赖 3.6h」，而实际等 T418 只有 12m。
+ *
+ * 取三者的较晚者：进入当前状态的时刻、当前每个未完成前置的加边时刻、最近一次删边时刻。
+ */
+function blockingSetSince(db: DatabaseSync, order: Order, entered: string, current: Upstream[]): string {
+	const unfinished = current.filter((up) => up.state !== stateOf(db, "done"));
+	let since = entered;
+	const addAt = db.prepare(
+		"SELECT at FROM events WHERE order_id=? AND kind='dep-add' AND note=? ORDER BY id DESC LIMIT 1",
+	);
+	for (const up of unfinished) {
+		const row = addAt.get(order.id, up.id) as { at: string } | undefined;
+		if (row) since = later(since, row.at);
+	}
+	// 删边本身也改变了这组前置：同一次交接里删旧加新时，以更晚的那步为准
+	const removedAt = db
+		.prepare("SELECT at FROM events WHERE order_id=? AND kind='dep-remove' ORDER BY id DESC LIMIT 1")
+		.get(order.id) as { at: string } | undefined;
+	if (removedAt) since = later(since, removedAt.at);
+	return since;
+}
+
 export function describeWaiting(db: DatabaseSync, order: Order): Waiting {
 	const entered = enteredStateAt(db, order.id, order.state) ?? order.updatedAt;
 	const current = db
@@ -84,7 +110,14 @@ export function describeWaiting(db: DatabaseSync, order: Order): Waiting {
 	}
 	const role = roleOf(db, order.state);
 	const execution = role === "claimable" || role === "rework";
-	if (execution && dependencies.length) return { order, kind: "dependency", dependencies, since: entered };
+	if (execution && dependencies.length) {
+		// 起点跟当前这组前置走，不是无条件用「进入状态的时刻」：换过依赖边之后，
+		// 旧前置的时长不该继续算在新前置头上。
+		const since = blockingSetSince(db, order, entered, current);
+		return since === entered
+			? { order, kind: "dependency", dependencies, since }
+			: { order, kind: "dependency", dependencies, since, blockedSince: entered };
+	}
 	let since = entered;
 	if (execution) {
 		for (const interval of dependencyIntervals(db, order, current)) {

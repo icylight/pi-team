@@ -181,7 +181,15 @@ export function collectDue(db: DatabaseSync, config: WatchConfig, now = Date.now
 		if (waiting.kind !== "dependency") continue;
 		const waited = dependencyWaitMinutes(db, waiting.order, now);
 		if (waited < config.waitMinutes) continue;
-		put({ waiting, reason: "wait", detail: `等依赖已 ${formatAgo(waited)}` });
+		// 换过依赖边就说明「整段多久、当前这组多久」，只报后者会让人以为整段都短
+		const whole = waiting.blockedSince
+			? Math.max(0, Math.round((now - Date.parse(waiting.blockedSince)) / 60_000))
+			: waited;
+		const detail =
+			whole > waited
+				? `等依赖整段 ${formatAgo(whole)}，当前这组 ${formatAgo(waited)}`
+				: `等依赖已 ${formatAgo(waited)}`;
+		put({ waiting, reason: "wait", detail });
 	}
 
 	return [...picked.values()].sort((a, b) => Date.parse(a.waiting.since) - Date.parse(b.waiting.since));
