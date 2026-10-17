@@ -62,6 +62,7 @@ import {
 	type WatchState,
 	watchConfigFile,
 } from "./core/watch.ts";
+import { buildFreshness } from "./core/web-build.ts";
 
 let api: ExtensionAPI | undefined;
 
@@ -119,6 +120,26 @@ function openBrowser(url: string): void {
 	}
 }
 
+/** 重建看板产物。同步跑：这个操作要在起服务之前完成，用户等十几秒比拿到旧页面好 */
+async function webRebuild(webRoot: string): Promise<{ ok: boolean; detail: string }> {
+	const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+	return await new Promise((resolve) => {
+		const child = spawn(npm, ["run", "build"], { cwd: webRoot, stdio: ["ignore", "pipe", "pipe"] });
+		let out = "";
+		const collect = (chunk: Buffer) => {
+			out += chunk.toString();
+			if (out.length > 20_000) out = out.slice(-20_000);
+		};
+		child.stdout?.on("data", collect);
+		child.stderr?.on("data", collect);
+		child.on("error", (error) => resolve({ ok: false, detail: String(error) }));
+		child.on("close", (code) => {
+			if (code === 0) resolve({ ok: true, detail: "" });
+			else resolve({ ok: false, detail: out.trimEnd().split("\n").slice(-12).join("\n") });
+		});
+	});
+}
+
 /** `/orders web`：没有在跑的就起一个，然后开浏览器；`stop` 把常驻的那个收掉 */
 async function handleWeb(sub: string, ctx: ExtensionContext): Promise<void> {
 	const port = webPort();
@@ -133,7 +154,36 @@ async function handleWeb(sub: string, ctx: ExtensionContext): Promise<void> {
 		ctx.ui.notify(`端口 ${port} 上没有在跑的看板`, "warning");
 		return;
 	}
-	if (await webAlive(port)) {
+	const webRoot = fileURLToPath(new URL("./web", import.meta.url));
+	const nextBin = path.join(webRoot, "node_modules", "next", "dist", "bin", "next");
+	const running = await webAlive(port);
+
+	// 产物旧了就先重建：否则跑的是旧代码，页面上报的错与库无关（典型是 SCHEMA_VERSION 对不上）。
+	// 已在跑也一样——旧进程同样得换掉，不然用户看到的还是旧逻辑。
+	const build = buildFreshness(webRoot);
+	if (build.stale && fs.existsSync(nextBin)) {
+		const why = build.buildAt
+			? `产物建于 ${new Date(build.buildAt).toLocaleString("zh-CN", { hour12: false })}，` +
+				`而 ${path.relative(webRoot, build.newestSource) || "源码"} 改于 ` +
+				`${new Date(build.sourceAt).toLocaleString("zh-CN", { hour12: false })}`
+			: "还没有构建产物";
+		ctx.ui.notify(`看板产物过期（${why}），正在重建，约十几秒…`, "info");
+		if (running) {
+			await webStop(port);
+			for (let i = 0; i < 30 && (await webAlive(port, 200)); i++) await sleep(100);
+		}
+		const rebuilt = await webRebuild(webRoot);
+		if (!rebuilt.ok) {
+			ctx.ui.notify(`看板重建失败：\n${rebuilt.detail}`, "warning");
+			return;
+		}
+		if (await webAlive(port)) {
+			// 重建期间别人可能已经把服务起起来了，那它读的也是新产物，直接用
+			openBrowser(url);
+			ctx.ui.notify(`看板已重建并在跑：${url}`, "info");
+			return;
+		}
+	} else if (running) {
 		openBrowser(url);
 		ctx.ui.notify(`看板已在跑，已打开浏览器：${url}`, "info");
 		return;
@@ -141,9 +191,7 @@ async function handleWeb(sub: string, ctx: ExtensionContext): Promise<void> {
 
 	try {
 		// Next 的服务：用 next 的 bin 直接起（不依赖 PATH 里的 next），绑 127.0.0.1 由 -H 指定。
-		// 构建产物在 web/.next，需开发机先 npm run build；git 源安装的检出同样要自己 build 一次。
-		const webRoot = fileURLToPath(new URL("./web", import.meta.url));
-		const nextBin = path.join(webRoot, "node_modules", "next", "dist", "bin", "next");
+		// 产物过期时上面已重建；没有产物又缺依赖的，给出安装命令。
 		if (!fs.existsSync(nextBin)) {
 			ctx.ui.notify(`看板的 Next 依赖没装。先构建：cd ${webRoot} && npm install && npm run build`, "warning");
 			return;

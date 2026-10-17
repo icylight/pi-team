@@ -423,3 +423,38 @@ test("默认仍自动升级：不设变量时行为不变", () => {
 	assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
 	reopened.close();
 });
+
+// ── 看板产物过期判定 ──────────────────────────────
+
+test("产物比源码旧就算过期；源码不动则不过期", async () => {
+	const { buildFreshness } = await import("../core/web-build.ts");
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "web-stale-"));
+	const web = path.join(root, "web");
+	fs.mkdirSync(path.join(web, ".next"), { recursive: true });
+	fs.mkdirSync(path.join(web, "lib"), { recursive: true });
+	fs.writeFileSync(path.join(web, "lib", "a.ts"), "x");
+
+	// 没有产物：算过期
+	assert.equal(buildFreshness(web).stale, true);
+
+	// 产物比源码新：不过期
+	const buildId = path.join(web, ".next", "BUILD_ID");
+	fs.writeFileSync(buildId, "id");
+	const future = Date.now() + 60_000;
+	fs.utimesSync(buildId, future / 1000, future / 1000);
+	assert.equal(buildFreshness(web).stale, false);
+
+	// 源码改到产物之后：过期，且能指出是哪个文件
+	const later = future + 60_000;
+	fs.utimesSync(path.join(web, "lib", "a.ts"), later / 1000, later / 1000);
+	const result = buildFreshness(web);
+	assert.equal(result.stale, true);
+	assert.match(result.newestSource, /lib\/a\.ts$/);
+
+	// node_modules 与 .next 不参与比较
+	fs.mkdirSync(path.join(web, "node_modules"), { recursive: true });
+	fs.writeFileSync(path.join(web, "node_modules", "x.ts"), "y");
+	const evenLater = later + 60_000;
+	fs.utimesSync(path.join(web, "node_modules", "x.ts"), evenLater / 1000, evenLater / 1000);
+	assert.doesNotMatch(buildFreshness(web).newestSource, /node_modules/);
+});

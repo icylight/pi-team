@@ -38,13 +38,19 @@
 - 只绑 `127.0.0.1`，库一律**只读**打开。schema 落后的库读不了，页面上会提示去那个项目里跑一次 `/orders` 升级
 - 扫描根默认取当前目录与 `$CODE_ROOT`（缺省 `~/code`）下的一级子目录；端口已占且不是看板时，换 `--port`
 
-看板是 Next.js（App Router + shadcn/ui）应用，源码在 `web/`。产物不入库，**先构建再起**：
+看板是 Next.js（App Router + shadcn/ui）应用，源码在 `web/`。产物不入库，第一次要装依赖并构建：
 
 ```bash
-cd pi-work-orders/web && npm install && npm run build   # 一次即可，改了 UI 再 build
+cd pi-work-orders/web && npm install && npm run build
 ```
 
-开发时用 `npm run dev`。`/orders web` 起的是构建产物（`next start -H 127.0.0.1`），构建目录缺失时它会提示先 build。
+**之后不用手动重建**：`/orders web` 会比对 `.next/BUILD_ID` 与源码（含 `core/`）的修改时间，
+产物旧了就先重建、再把已在跑的旧进程换掉，然后才起服务。
+
+这条判据必要，是因为 `next start` 跑的是构建时生成的副本：改了 `core/*.ts` 不重建，
+看板仍在用旧逻辑。典型症状是页面报「库版本比工具新」，看着像数据库坏了，实际只是产物旧了。
+
+开发时用 `npm run dev`（不受这套判据约束）。`/orders web` 起的是构建产物（`next start -H 127.0.0.1`），构建目录缺失时它会提示先 build。
 
 ## 下一步找谁：有序候选
 
