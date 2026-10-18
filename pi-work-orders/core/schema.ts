@@ -257,7 +257,13 @@ export function stateOf(db: DatabaseSync, role: StateRole): string {
  * 配成空数组表示这个项目不分类，此时任何 type 都不合法。
  */
 export function typesOf(db: DatabaseSync): string[] {
-	return getMeta<string[]>(db, "types") ?? [...DEFAULT_TYPES];
+	const raw = getMeta<unknown>(db, "types");
+	if (raw === undefined) return [...DEFAULT_TYPES];
+	// 配置面是直接写库的：写错形状就报错，不静默退回默认值（否则以为改了其实没生效）
+	if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string")) {
+		throw new LedgerError(`meta.types 要写成字符串数组，例如 ["需求单","实施单"]；现在是：${JSON.stringify(raw)}`);
+	}
+	return (raw as string[]).map((item) => item.trim()).filter(Boolean);
 }
 
 /** 类型必须落在枚举里：写错名字当场报错，不让它悄悄变成第 N 种分类 */

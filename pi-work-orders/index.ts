@@ -560,7 +560,8 @@ export default function (pi: ExtensionAPI) {
 			idPrefix: Type.Optional(Type.String({ description: "工单号前缀，默认 T" })),
 			types: Type.Optional(
 				Type.Array(Type.String(), {
-					description: "工单类型枚举，默认 需求单 / 实施单 / bug 单；建库后要改就写库里的 meta.types",
+					description:
+						"工单类型枚举，默认 需求单 / 实施单 / bug 单；建库后要改就写库里的 meta.types。传空数组表示这个项目不分类",
 				}),
 			),
 		}),

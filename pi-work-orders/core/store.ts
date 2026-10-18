@@ -171,9 +171,10 @@ export function listOrders(db: DatabaseSync, filter: ListFilter = {}): ListedOrd
 		params.push(filter.nextActor);
 	}
 	if (filter.type) {
-		assertType(db, filter.type); // 枚举外的类型名直接报错，不静默返回空
+		const type = filter.type.trim();
+		assertType(db, type); // 枚举外的类型名直接报错，不静默返回空
 		clauses.push("type = ?");
-		params.push(filter.type);
+		params.push(type);
 	}
 	if (filter.ready) {
 		clauses.push(

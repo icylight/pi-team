@@ -29,7 +29,7 @@ function agingEvent(db, orderId, minutes) {
 }
 
 /** 退回 v4 结构：v5 之后加的列要整批退掉，否则升级时 ADD COLUMN 会撞已存在的列 */
-const V5_COLUMNS = [
+const V5_PLUS_COLUMNS = [
 	"type",
 	"estimate_active_min",
 	"estimate_wall_min",
@@ -42,7 +42,7 @@ const V5_COLUMNS = [
 ];
 
 function downgradeToV4(db) {
-	for (const column of V5_COLUMNS) db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
+	for (const column of V5_PLUS_COLUMNS) db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
 	db.exec("PRAGMA user_version=4;");
 }
 

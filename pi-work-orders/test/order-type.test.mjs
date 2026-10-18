@@ -105,6 +105,27 @@ test("按类型筛：命中、枚举外报错、空结果给提示", () => {
 	db.close();
 });
 
+test("meta.types 写坏形状就报错，不静默退回默认值", () => {
+	const { db } = freshLedger();
+	setMeta(db, "types", "需求单,实施单");
+	assert.throws(() => typesOf(db), /meta.types 要写成字符串数组/);
+	assert.throws(() => createOrder(db, { title: "带类型", nextActors: ["dev"], type: "需求单" }, owner), /字符串数组/);
+	setMeta(db, "types", ["需求单", 42]);
+	assert.throws(() => typesOf(db), /字符串数组/);
+	db.close();
+});
+
+test("可开工筛选与类型筛选能叠用", () => {
+	const { db } = freshLedger();
+	createOrder(db, { title: "缺陷待修", nextActors: ["dev"], type: "bug 单" }, owner);
+	createOrder(db, { title: "需求待做", nextActors: ["dev"], type: "需求单" }, owner);
+	assert.deepEqual(
+		listOrders(db, { ready: true, type: "bug 单" }).map((o) => o.title),
+		["缺陷待修"],
+	);
+	db.close();
+});
+
 test("库内改配置后，新类型立刻生效（meta.types）", () => {
 	const { db } = freshLedger();
 	setMeta(db, "types", ["需求单", "实施单", "bug 单", "调研"]);
