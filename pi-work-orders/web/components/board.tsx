@@ -2,6 +2,7 @@ import { DispatchFacts } from "@/components/dispatch-facts";
 import type { DispatchOrder, DispatchSnapshot } from "../../core/dispatch";
 import Link from "next/link";
 import { ActorName, HUMAN_ACCENT, waitsForHuman } from "@/components/human-actor";
+import { TypeLabel } from "@/components/order-type";
 import { waitedLabel } from "@/components/orders-table";
 import { roleOfState } from "@/components/state-badge";
 import { ROLES, TERMINAL_ROLES, type ListedOrder, type StateRole, type Waiting } from "../../core/types";
@@ -98,7 +99,10 @@ function Card({
 			className={`block rounded-md border bg-background p-2.5 transition-colors hover:border-primary/60 ${waitsForHuman(order.nextActors) ? HUMAN_ACCENT : ""}`}
 		>
 			<div className="flex items-baseline justify-between gap-2">
-				<span className="font-mono text-xs text-muted-foreground">{order.id}</span>
+				<span className="flex items-baseline gap-1.5">
+					<span className="font-mono text-xs text-muted-foreground">{order.id}</span>
+					<TypeLabel type={order.type} />
+				</span>
 				{waited ? <span className="text-xs whitespace-nowrap text-amber-600 dark:text-amber-400">{waited}</span> : null}
 			</div>
 			<p className="mt-1 line-clamp-2 text-sm leading-snug">{order.title}</p>

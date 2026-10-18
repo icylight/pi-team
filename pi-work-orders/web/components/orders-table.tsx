@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ActorName } from "@/components/human-actor";
+import { TypeLabel } from "@/components/order-type";
 import { StateBadge } from "@/components/state-badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { ListedOrder, StateRole, Waiting } from "../../core/types";
@@ -33,6 +34,7 @@ export function OrdersTable({
 				<TableRow>
 					<TableHead className="w-16">id</TableHead>
 					<TableHead className="w-20">状态</TableHead>
+					<TableHead className="w-20">类型</TableHead>
 					<TableHead className="w-28">下一步</TableHead>
 					<TableHead className="w-24">依赖</TableHead>
 					<TableHead>标题</TableHead>
@@ -51,6 +53,9 @@ export function OrdersTable({
 							</TableCell>
 							<TableCell>
 								<StateBadge state={o.state} states={states} />
+							</TableCell>
+							<TableCell>
+								<TypeLabel type={o.type} fallback={<span className="text-muted-foreground">-</span>} />
 							</TableCell>
 							<TableCell className="text-sm">
 								{o.nextActors.length ? (

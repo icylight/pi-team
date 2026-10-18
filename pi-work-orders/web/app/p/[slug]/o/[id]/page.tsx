@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { StateBadge } from "@/components/state-badge";
 import { ActorName } from "@/components/human-actor";
+import { TypeLabel } from "@/components/order-type";
 import { Markdown } from "@/components/markdown";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ledgers, orderPage } from "@/lib/ledger";
@@ -73,6 +74,7 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 				</h1>
 				<div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
 					<StateBadge state={view.state} states={states} />
+					{view.type ? <TypeLabel type={view.type} /> : null}
 					<span>
 						下一步找谁：
 						{view.nextActors.length
