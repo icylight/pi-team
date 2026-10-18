@@ -250,6 +250,14 @@ export default function (pi: ExtensionAPI) {
 		return { ...loaded.config.roles?.[role], ...loaded.config.group?.roles?.[role] };
 	}
 
+	/** 角色的项目内可见范围：没配就是人人可见；换了角色要重新取一份写进注册表 */
+	function roleVisibleTo(role?: string): string[] | undefined {
+		if (!role) return undefined;
+		const config = currentConfig();
+		const visibleTo = config.group?.roles?.[role]?.visibleTo ?? config.roles?.[role]?.visibleTo;
+		return visibleTo?.length ? visibleTo : undefined;
+	}
+
 	/** 当前会话的模型与思考等级：角色不变时由它当新会话的初始值 */
 	function currentDefaults(ctx: ExtensionContext): RoleDefaults {
 		return {
@@ -380,6 +388,7 @@ export default function (pi: ExtensionAPI) {
 			project,
 			role: effectiveRole,
 			roleSlot,
+			visibleTo: roleVisibleTo(effectiveRole),
 			roleAssignmentVersion: 1,
 			newSessionVersion: 1,
 			newSessionEpoch: newMessageId(),
@@ -543,6 +552,11 @@ export default function (pi: ExtensionAPI) {
 	/** 解析失败时给一句能自救的提示：项目不存在与名字不存在是两种错 */
 	function resolveHint(to: string, res: Extract<ResolveResult, { ok: false }>): string {
 		if (res.reason === "self") return "目标是你自己，不能发给自己。";
+		if (res.reason === "hidden") {
+			const who = res.candidates[0]?.name ?? to;
+			const me = self?.role ? `你的角色是 ${self.role}` : "当前会话没有角色";
+			return `${who} 对你隐身（${me}，它的 visibleTo 名单里没有你），消息没发出。要联系它，让名单里的角色转。`;
+		}
 		const { project, name } = splitTarget(to);
 		if (res.reason === "offline") {
 			// 离线不写信箱：写进死 key 的信没人取，发件人会以为已经送达
@@ -836,8 +850,9 @@ export default function (pi: ExtensionAPI) {
 						? store.resolveIdle(target, self.key)
 						: resolveTarget(target);
 			if (!resolved.ok) {
-				// 在忙与离线要分开报：前者等一等就好，后者得换人
+				// 在忙、离线、隐身要分开报：前者等一等就好，后者得换人
 				if (resolved.reason === "busy") skipped.push(`${resolved.candidates[0]?.name ?? target} 在忙`);
+				else if (resolved.reason === "hidden") skipped.push(`${resolved.candidates[0]?.name ?? target} 对你隐身`);
 				continue;
 			}
 			if (resolved.member.key === self.key && !request.handoff) continue;
@@ -1030,6 +1045,7 @@ export default function (pi: ExtensionAPI) {
 		roleCard = readOptionalFile(cardPath);
 		self.role = role;
 		self.roleSlot = slot;
+		self.visibleTo = roleVisibleTo(role);
 		self.name = slot;
 		if (res?.model) self.model = `${res.model.provider}/${res.model.id}`;
 		pi.appendEntry(ROLE_ENTRY, { role, name: slot });
@@ -1052,6 +1068,7 @@ export default function (pi: ExtensionAPI) {
 			restoreName(ctx) ?? pi.getSessionName() ?? `${path.basename(ctx.cwd) || "session"}-${process.pid}`;
 		self.role = undefined;
 		self.roleSlot = undefined;
+		self.visibleTo = undefined;
 		self.name = fallback;
 		// role 记空串而不是删条目：restoreRole 取最后一条，空串表示「明确取消过」
 		pi.appendEntry(ROLE_ENTRY, { role: "", name: fallback });

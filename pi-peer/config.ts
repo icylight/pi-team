@@ -34,6 +34,8 @@ export interface RoleConfig {
 	thinkingLevel?: ThinkingLevel;
 	canAssignRoles?: boolean;
 	canStartSessions?: boolean;
+	/** 项目内可见范围：非空时该角色隐身，只有名单里的基础角色看得见它、能给它发消息 */
+	visibleTo?: string[];
 }
 
 export interface ProjectConfig {
@@ -164,6 +166,14 @@ function parseRoles(raw: unknown, field: string, problems: string[]): Record<str
 					else problems.push(`${field}.${role}.${key} 要写 true 或 false，这一项被忽略`);
 				}
 			}
+			if (value.visibleTo !== undefined) {
+				if (Array.isArray(value.visibleTo)) {
+					const names = value.visibleTo.filter((v): v is string => typeof v === "string").map((v) => v.trim());
+					if (names.every(Boolean) && names.length === value.visibleTo.length) {
+						if (names.length) parsed.visibleTo = [...new Set(names)];
+					} else problems.push(`${field}.${role}.visibleTo 要写角色名数组，写错的项被忽略`);
+				} else problems.push(`${field}.${role}.visibleTo 要写角色名数组，这一项被忽略`);
+			}
 			roles[role] = parsed;
 		} else {
 			problems.push(`${field}.${role} 要写角色卡路径字符串或 { card: 路径 }，这一项被忽略`);
@@ -191,7 +201,8 @@ export interface ConfigItem {
 		| "thinkingLevel"
 		| "canAssignRoles"
 		| "canStartSessions"
-		| "wakeOnHandoff";
+		| "wakeOnHandoff"
+		| "visibleTo";
 	label: string;
 	value: string;
 	origin: Origin;
@@ -278,6 +289,19 @@ export function describeConfig(
 					: { kind: "absent", detail: "未配置，保留会话设置" },
 			});
 		}
+		const groupVisible = loaded.config.group?.roles?.[options.role]?.visibleTo;
+		const visibleTo = groupVisible ?? loaded.config.roles?.[options.role]?.visibleTo;
+		items.push({
+			key: "visibleTo",
+			label: "项目内可见范围",
+			value: visibleTo?.length ? `${visibleTo.join("、")}（对其他角色隐身）` : "不隐身",
+			origin: visibleTo?.length
+				? {
+						kind: "declared",
+						detail: `${groupVisible !== undefined ? "group.roles" : "roles"}.${options.role}.visibleTo`,
+					}
+				: { kind: "absent", detail: "未配置，项目内所有人都看得见" },
+		});
 	}
 
 	items.push({

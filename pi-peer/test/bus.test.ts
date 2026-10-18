@@ -525,3 +525,58 @@ test("/peer-config 把生效配置逐项摊开", async () => {
 		peer.restore();
 	}
 });
+
+// ── 项目内可见范围（visibleTo）────────────────────────
+
+/** 挂会话并领角色：角色卡在 .pi/characters/<角色>.md，会话启动时按 PI_PEER_ROLE 加载 */
+async function mountAsRole(cwd: string, peerRoot: string, role: string) {
+	fs.mkdirSync(path.join(cwd, ".pi", "characters"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "characters", `${role}.md`), `${role} card`, "utf8");
+	const previousRole = process.env.PI_PEER_ROLE;
+	process.env.PI_PEER_ROLE = role;
+	const peer = mountPeer(cwd, peerRoot);
+	await (peer.handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>)?.({}, ctxFor(cwd));
+	return {
+		peer,
+		restore() {
+			peer.restore();
+			if (previousRole === undefined) delete process.env.PI_PEER_ROLE;
+			else process.env.PI_PEER_ROLE = previousRole;
+		},
+	};
+}
+
+test("visibleTo：名单外的会话在列表里看不到它，发消息报隐身", async () => {
+	const { cwd, peerRoot, store } = tmpPair();
+	const mounted = await mountAsRole(cwd, peerRoot, "qa");
+	try {
+		liveMember(peerRoot, cwd, "9000-aaaa", "dev", { visibleTo: ["owner"], messageProtocol: 1 });
+
+		const list = await callTool(mounted.peer.tools, "peer_list", {}, cwd);
+		assert.equal(list.includes("dev"), false, "隐身角色不该出现在列表里");
+
+		const send = await callTool(mounted.peer.tools, "peer_send", { to: "dev", text: "打扰一下" }, cwd);
+		assert.match(send, /对你隐身/);
+		assert.match(send, /你的角色是 qa/);
+		assert.equal(store.drain("9000-aaaa").length, 0, "隐身角色收不到消息");
+	} finally {
+		mounted.restore();
+	}
+});
+
+test("visibleTo：名单内的角色照常看得见、发得进", async () => {
+	const { cwd, peerRoot, store } = tmpPair();
+	const mounted = await mountAsRole(cwd, peerRoot, "owner");
+	try {
+		liveMember(peerRoot, cwd, "9000-bbbb", "dev", { visibleTo: ["owner"], messageProtocol: 1 });
+
+		const list = await callTool(mounted.peer.tools, "peer_list", {}, cwd);
+		assert.match(list, /dev/);
+
+		const send = await callTool(mounted.peer.tools, "peer_send", { to: "dev", text: "T01 交给你" }, cwd);
+		assert.match(send, /已写入 dev 的收件箱/);
+		assert.equal(store.drain("9000-bbbb").length, 1);
+	} finally {
+		mounted.restore();
+	}
+});

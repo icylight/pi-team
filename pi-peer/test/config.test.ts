@@ -71,6 +71,22 @@ test("角色表字符串简写也收", () => {
 	assert.equal(load(cwd).config.roles?.dev?.card, ".pi/characters/dev.md");
 });
 
+test("visibleTo 收角色名数组，去重；写错不生效并报出来", () => {
+	const { cwd } = project({
+		".pi/peer.json": {
+			group: { roles: { dev: { card: ".pi/characters/dev.md", visibleTo: ["owner", " owner ", "qa"] } } },
+		},
+	});
+	assert.deepEqual(load(cwd).config.group?.roles?.dev?.visibleTo, ["owner", "qa"], "去空格并去重");
+
+	const bad = project({
+		".pi/peer.json": { group: { roles: { dev: { card: ".pi/characters/dev.md", visibleTo: "owner" } } } },
+	});
+	const loaded = load(bad.cwd);
+	assert.equal(loaded.config.group?.roles?.dev?.visibleTo, undefined);
+	assert.match(loaded.problems.join("\n"), /visibleTo 要写角色名数组/);
+});
+
 test("字段写错：一处一条，写错的字段不让它生效，别的字段照读", () => {
 	const { cwd } = project({
 		".pi/peer.json": {
@@ -207,6 +223,7 @@ test("声明齐全时，报告里每项都是「配置」来源，没有兜底�
 			"canStartSessions:declared",
 			"model:declared",
 			"thinkingLevel:declared",
+			"visibleTo:absent",
 			"wakeOnHandoff:absent",
 			"flow:declared",
 		],

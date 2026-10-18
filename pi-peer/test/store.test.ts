@@ -46,6 +46,8 @@ function member(
 		busy: boolean;
 		busySince: number;
 		hidden: boolean;
+		role: string;
+		visibleTo: string[];
 	}> = {},
 ) {
 	const m = {
@@ -616,6 +618,69 @@ describe("专注模式：隐身的会话不让别人选到", () => {
 
 		assert.equal(a.resolveScoped("proj-b", "hidden-owner", "9400-1111").ok, false);
 		assert.equal(a.resolveScoped("proj-b", "hidden-owner", "9400-1111").candidates.length, 0);
+	});
+});
+
+describe("项目内可见范围：visibleTo 只让名单里的角色找得到", () => {
+	it("名单内的角色看得见、发得进；名单外的看不见，且报 hidden 而不是 none", () => {
+		const store = freshStore();
+		const owner = member(store, "9500-1111", "owner", { role: "owner" });
+		const qa = member(store, "9501-2222", "qa", { role: "qa" });
+		member(store, "9502-3333", "dev", { role: "dev", visibleTo: ["owner"] });
+
+		assert.deepEqual(
+			store
+				.listScoped({ selfKey: owner.key })
+				.map((s) => s.member.name)
+				.sort(),
+			["dev", "owner", "qa"],
+			"名单内的角色看得到它",
+		);
+		assert.deepEqual(
+			store
+				.listScoped({ selfKey: qa.key })
+				.map((s) => s.member.name)
+				.sort(),
+			["owner", "qa"],
+			"名单外看不见 dev",
+		);
+		assert.equal(store.resolve("dev", owner.key).ok, true);
+
+		const blocked = store.resolve("dev", qa.key);
+		assert.equal(blocked.ok, false);
+		assert.equal(blocked.ok === false && blocked.reason, "hidden", "能分辨是隐身，不是没这个人");
+		assert.equal(blocked.ok === false && blocked.candidates[0]?.name, "dev");
+	});
+
+	it("没角色的会话一律看不见：名单无从匹配", () => {
+		const store = freshStore();
+		const plain = member(store, "9600-1111", "plain");
+		member(store, "9601-2222", "dev", { role: "dev", visibleTo: ["owner"] });
+
+		assert.deepEqual(
+			store.listScoped({ selfKey: plain.key }).map((s) => s.member.name),
+			["plain"],
+		);
+		assert.equal(store.resolve("dev", plain.key).ok === false && store.resolve("dev", plain.key).reason, "hidden");
+	});
+
+	it("跨项目寻址也看不见，也不会在结果里出现", () => {
+		const { a, b } = crossPair();
+		member(a, "9700-1111", "owner", { role: "owner" });
+		member(b, "9701-2222", "dev", { role: "dev", visibleTo: ["owner"], project: "proj-b" });
+
+		const res = a.resolveScoped("proj-b", "dev", "9700-1111");
+		assert.equal(res.ok, false);
+		assert.equal(res.ok === false && res.reason, "hidden");
+	});
+
+	it("自己还看得见自己", () => {
+		const store = freshStore();
+		member(store, "9800-1111", "dev", { role: "dev", visibleTo: ["owner"] });
+		assert.deepEqual(
+			store.listScoped({ selfKey: "9800-1111" }).map((s) => s.member.name),
+			["dev"],
+		);
 	});
 });
 

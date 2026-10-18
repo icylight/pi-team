@@ -80,6 +80,11 @@ export interface Member {
 	busySince?: number;
 	/** 专注模式（/peer-focus）：对其他会话隐身。别的会话在列表、解析与投递里都看不到它 */
 	hidden?: boolean;
+	/**
+	 * 项目内可见范围：非空时该角色隐身，只有名单里的基础角色看得见它、能给它发消息。
+	 * 注册时从项目配置算好写进来，发现方不必读对方的配置文件。
+	 */
+	visibleTo?: string[];
 }
 
 /** 忙超过这个时长就当它卡住了：不再信任 busy，避免一次异常让该会话永远收不到消息 */
@@ -123,7 +128,7 @@ export type ResolveResult =
 	| { ok: true; member: Member; bucket: string; live: boolean }
 	| {
 			ok: false;
-			reason: "self" | "none" | "ambiguous" | "offline" | "busy";
+			reason: "self" | "none" | "ambiguous" | "offline" | "busy" | "hidden";
 			candidates: Member[];
 			/** 仅跨项目解析失败时给：本机在线的项目标签，用于「没有这个项目」的提示 */
 			projects?: string[];
@@ -539,9 +544,9 @@ export class PeerStore {
 		return [...live, ...stale].sort((a, b) => (a.member.startedAt ?? 0) - (b.member.startedAt ?? 0));
 	}
 
-	/** 本项目桶的成员，带存活标记。专注模式的成员只对本人可见（selfKey） */
+	/** 本项目桶的成员，带存活标记。专注与可见范围的过滤都在 visibleToViewer 里 */
 	listScoped(opts: { includeStale?: boolean; selfKey?: string } = {}): ScopedMember[] {
-		return withoutHidden(this.readBucket(this.dir), opts.selfKey).filter((s) => opts.includeStale || s.live);
+		return visibleToViewer(this.readBucket(this.dir), opts.selfKey).filter((s) => opts.includeStale || s.live);
 	}
 
 	/** 列出存活成员（顺带清理过期注册表） */
@@ -549,8 +554,13 @@ export class PeerStore {
 		return this.listScoped(opts).map((s) => s.member);
 	}
 
-	/** 扫全部桶：有谁在、在哪个桶、属于哪个项目 */
+	/** 扫全部桶：有谁在、在哪个桶、属于哪个项目。可见性按浏览方一次判完（浏览方可能不在同一个桶） */
 	listAllMembers(opts: { includeStale?: boolean; selfKey?: string } = {}): ScopedMember[] {
+		return visibleToViewer(this.scanBuckets(), opts.selfKey).filter((s) => s.live || opts.includeStale);
+	}
+
+	/** 扫全部桶且不做可见性过滤：仅用于分辨「没这个人」与「它对你隐身」 */
+	private scanBuckets(): ScopedMember[] {
 		let names: string[];
 		try {
 			names = fs.readdirSync(this.root);
@@ -566,9 +576,7 @@ export class PeerStore {
 			} catch {
 				continue;
 			}
-			for (const s of withoutHidden(this.readBucket(bucket), opts.selfKey)) {
-				if (s.live || opts.includeStale) out.push(s);
-			}
+			out.push(...this.readBucket(bucket));
 		}
 		return out;
 	}
@@ -620,22 +628,24 @@ export class PeerStore {
 		const q = query.trim().replace(/^@/, "");
 		if (!q) return { ok: false, reason: "none", candidates: [] };
 
-		const members = withoutHidden(this.readBucket(this.dir), selfKey);
+		const bucket = this.readBucket(this.dir);
+		const members = visibleToViewer(bucket, selfKey);
 		if (members.some((s) => s.member.key === selfKey && matchesQuery(s.member, q))) {
 			return { ok: false, reason: "self", candidates: [] };
 		}
-		return this.pickLive(members, q, selfKey);
+		return this.withHiddenBucket(this.pickLive(members, q, selfKey), bucket, q, selfKey);
 	}
 
 	/** 只在空闲的在线成员里解析：派工走它，避免 steer 插进别人正在做的事 */
 	resolveIdle(query: string, selfKey: string): ResolveResult {
 		const q = query.trim().replace(/^@/, "");
 		if (!q) return { ok: false, reason: "none", candidates: [] };
-		const members = withoutHidden(this.readBucket(this.dir), selfKey);
+		const bucket = this.readBucket(this.dir);
+		const members = visibleToViewer(bucket, selfKey);
 		if (members.some((s) => s.member.key === selfKey && matchesQuery(s.member, q))) {
 			return { ok: false, reason: "self", candidates: [] };
 		}
-		return this.pickLive(members, q, selfKey, true);
+		return this.withHiddenBucket(this.pickLive(members, q, selfKey, true), bucket, q, selfKey);
 	}
 
 	/**
@@ -645,7 +655,8 @@ export class PeerStore {
 	 */
 	resolveScoped(project: string, name: string, selfKey: string): ResolveResult {
 		const q = name.trim().replace(/^@/, "");
-		const all = this.listAllMembers({ includeStale: true, selfKey });
+		const scanned = this.scanBuckets();
+		const all = visibleToViewer(scanned, selfKey);
 
 		const self = all.find((s) => s.member.key === selfKey);
 		if (self && self.project === project && matchesQuery(self.member, q)) {
@@ -653,11 +664,42 @@ export class PeerStore {
 		}
 
 		const inProject = all.filter((s) => s.project === project);
+		const blockedIn = () =>
+			this.blockedMatch(
+				scanned.filter((s) => s.project === project),
+				q,
+				selfKey,
+			);
 		if (!inProject.length) {
+			const blocked = blockedIn();
+			if (blocked) return { ok: false, reason: "hidden", candidates: [blocked] };
 			const projects = [...new Set(all.filter((s) => s.live).map((s) => s.project))].sort();
 			return { ok: false, reason: "none", candidates: [], projects };
 		}
-		return this.pickLive(inProject, q, selfKey);
+		const hit = this.pickLive(inProject, q, selfKey);
+		if (hit.ok || hit.reason !== "none") return hit;
+		const blocked = blockedIn();
+		return blocked ? { ok: false, reason: "hidden", candidates: [blocked] } : hit;
+	}
+
+	/**
+	 * 本项目解析失败时再查一次：名字对得上、但被可见性筛掉的成员算「对你隐身」，
+	 * 不归成「没有这个人」——后者会让人换名字重试，而实际得让名单里的角色来。
+	 */
+	private withHiddenBucket(hit: ResolveResult, bucket: ScopedMember[], q: string, selfKey: string): ResolveResult {
+		if (hit.ok || hit.reason !== "none") return hit;
+		const blocked = this.blockedMatch(bucket, q, selfKey);
+		return blocked ? { ok: false, reason: "hidden", candidates: [blocked] } : hit;
+	}
+
+	/** 只算被 visibleTo 挡掉的（专注模式的隐身仍按「找不到」处理） */
+	private blockedMatch(members: ScopedMember[], q: string, selfKey: string): Member | undefined {
+		const viewer = members.find((s) => s.member.key === selfKey);
+		const blocked = members.filter(
+			(s) => s.member.key !== selfKey && s.live && !s.member.hidden && !canSee(viewer, s),
+		);
+		const hit = this.pick(blocked, q, selfKey);
+		return hit.ok ? hit.member : undefined;
 	}
 
 	/**
@@ -918,13 +960,24 @@ export function isBusy(member: Member): boolean {
 }
 
 /**
- * 隐身过滤：专注模式（hidden）的成员只对本人可见。
+ * 隐身判据：两条规则在同一个函数里判，列表、解析、投递不再各写一遍。
  *
- * 不是另报一个「专注中」状态——隐身的用处就是让派工方根本选不中它，
- * 而不是看到一个要额外判断的强提示。传 selfKey 是为了让自己仍然看得到自己。
+ * - 专注模式（hidden）：只对本人可见。不是另报一个「专注中」状态——隐身的用处就是让派工方
+ *   根本选不中它，而不是看到一个要额外判断的强提示。
+ * - 可见范围（visibleTo）：设了名单的角色只对**同一个桶里**名单中的基础角色可见，其余会话看不到、
+ *   也解析不到。跨项目不因为同名角色而被当成名单里的人；浏览方没角色时一律看不见。
  */
-function withoutHidden(scoped: ScopedMember[], selfKey?: string): ScopedMember[] {
-	return scoped.filter((s) => !s.member.hidden || s.member.key === selfKey);
+function canSee(viewer: ScopedMember | undefined, target: ScopedMember): boolean {
+	if (target.member.hidden) return false;
+	const allow = target.member.visibleTo;
+	if (!allow?.length) return true;
+	const viewerRole = viewer?.member.role?.trim();
+	return Boolean(viewerRole && allow.includes(viewerRole) && viewer?.bucket === target.bucket);
+}
+
+function visibleToViewer(scoped: ScopedMember[], selfKey?: string): ScopedMember[] {
+	const viewer = selfKey ? scoped.find((s) => s.member.key === selfKey) : undefined;
+	return scoped.filter((s) => s.member.key === selfKey || canSee(viewer, s));
 }
 
 function assertKey(key: string): void {
