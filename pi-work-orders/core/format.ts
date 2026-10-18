@@ -54,12 +54,13 @@ export function formatList(orders: ListedOrder[], heading?: string, waiting: Wai
 	const lines = orders.map((o) => {
 		const id = pad(o.id, 6);
 		const state = pad(o.state, 6);
+		const type = pad(o.type ?? "-", 8);
 		const who = formatActors(o.nextActors, 10);
 		const dep = o.dependsOn.length ? short(o.dependsOn.join(", "), 24) : "-";
 		const reason = reasons.get(o.id);
-		return `${id}${state}${who}${pad(dep, 14)}${short(o.title, 70)}${reason ? `｜${reason}` : ""}`;
+		return `${id}${state}${type}${who}${pad(dep, 14)}${short(o.title, 70)}${reason ? `｜${reason}` : ""}`;
 	});
-	const head = `${pad("id", 6)}${pad("状态", 6)}${pad("下一步找", 10)}${pad("依赖", 14)}标题`;
+	const head = `${pad("id", 6)}${pad("状态", 6)}${pad("类型", 8)}${pad("下一步找", 10)}${pad("依赖", 14)}标题`;
 	const body = [head, ...lines].join("\n");
 	return heading ? `${heading}（${orders.length} 条）\n${body}` : body;
 }
@@ -98,7 +99,8 @@ function formatEffort(view: OrderView, deviation?: DeliveryDeviation): string[] 
 export function formatOrder(view: OrderView, extra: { deviation?: DeliveryDeviation } = {}): string {
 	const lines: string[] = [];
 	lines.push(`${view.id}｜${view.title}`);
-	lines.push(`状态：${view.state}｜下一步找谁：${formatActors(view.nextActors)}`);
+	const type = view.type ? `类型：${view.type}｜` : "";
+	lines.push(`${type}状态：${view.state}｜下一步找谁：${formatActors(view.nextActors)}`);
 	if (view.dependsOn.length) {
 		const stale = view.staleDeps.length ? `（其中已失效：${view.staleDeps.join(", ")}）` : "";
 		lines.push(`依赖：${view.dependsOn.join(", ")}${stale}`);

@@ -13,6 +13,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { normalizeContents } from "./contents.ts";
 import {
+	assertType,
 	enteredStateAt,
 	getMeta,
 	idPrefixOf,
@@ -83,6 +84,7 @@ function toOrder(row: Row): Order {
 		id: String(row.id),
 		title: String(row.title),
 		body: String(row.body ?? ""),
+		type: row.type == null ? null : String(row.type),
 		contents: JSON.parse(String(row.contents ?? "[]")),
 		state: String(row.state),
 		nextActors: JSON.parse(String(row.next_actors)) as string[],
@@ -117,6 +119,12 @@ function assertMinutes(value: number | null | undefined, label: string): number 
 	if (value == null) return null;
 	if (!Number.isFinite(value) || value <= 0) throw new LedgerError(`${label}要写正数分钟：${value}`);
 	return Math.round(value);
+}
+
+/** 类型：空白当没分类；填了就必须在枚举里 */
+function normalizeType(db: DatabaseSync, type: string | null | undefined): string | null {
+	const trimmed = type?.trim();
+	return trimmed ? assertType(db, trimmed) : null;
 }
 
 function mustFind(db: DatabaseSync, id: string): Order {
@@ -161,6 +169,11 @@ export function listOrders(db: DatabaseSync, filter: ListFilter = {}): ListedOrd
 	if (filter.nextActor) {
 		clauses.push("EXISTS (SELECT 1 FROM json_each(orders.next_actors) WHERE value = ?)");
 		params.push(filter.nextActor);
+	}
+	if (filter.type) {
+		assertType(db, filter.type); // 枚举外的类型名直接报错，不静默返回空
+		clauses.push("type = ?");
+		params.push(filter.type);
 	}
 	if (filter.ready) {
 		clauses.push(
@@ -344,6 +357,7 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 	const states = statesOf(db);
 	const role: StateRole = input.role ?? "claimable";
 	if (!ROLES.includes(role)) throw new LedgerError(`未知角色：${role}`);
+	const type = normalizeType(db, input.type);
 	const id = input.id?.trim() || nextId(db);
 	if (db.prepare("SELECT id FROM orders WHERE id=?").get(id)) {
 		throw new LedgerError(`工单号已存在：${id}`);
@@ -366,14 +380,15 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 	db.exec("BEGIN IMMEDIATE;");
 	try {
 		db.prepare(
-			`INSERT INTO orders(id,title,body,contents,state,next_actors,closing_basis,
+			`INSERT INTO orders(id,title,body,contents,type,state,next_actors,closing_basis,
 			 estimate_active_min,estimate_wall_min,estimate_basis,placeholder_basis,created_at,updated_at,revision)
-			 VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?,?,1)`,
+			 VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,1)`,
 		).run(
 			id,
 			input.title.trim(),
 			input.body ?? "",
 			JSON.stringify(contents),
+			type,
 			states[role],
 			JSON.stringify(actors),
 			estimate.activeMin,
@@ -442,6 +457,7 @@ export function updateOrder(
 	const next = {
 		title: patch.title?.trim() || old.title,
 		body: nextBody,
+		type: patch.type === undefined ? old.type : normalizeType(db, patch.type),
 		contents: patch.contents === undefined ? old.contents : normalizeContents(patch.contents),
 		state: targetState,
 		nextActors,
@@ -492,7 +508,7 @@ export function updateOrder(
 	try {
 		const result = db
 			.prepare(
-				`UPDATE orders SET title=?, body=?, contents=?, state=?, next_actors=?, closing_basis=?,
+				`UPDATE orders SET title=?, body=?, contents=?, type=?, state=?, next_actors=?, closing_basis=?,
 			 estimate_active_min=?, estimate_wall_min=?, estimate_basis=?,
 			 actual_active_min=?, actual_wall_min=?, actual_wait_min=?, delivery_variance=?, placeholder_basis=?,
 			 updated_at=?, revision=revision+1 WHERE id=? AND (? IS NULL OR revision=?)`,
@@ -501,6 +517,7 @@ export function updateOrder(
 				next.title,
 				next.body,
 				JSON.stringify(next.contents),
+				next.type,
 				next.state,
 				JSON.stringify(nextActors),
 				next.closingBasis,
@@ -533,6 +550,7 @@ export function updateOrder(
 		} else if (
 			next.body !== old.body ||
 			next.title !== old.title ||
+			next.type !== old.type ||
 			JSON.stringify(next.contents) !== JSON.stringify(old.contents) ||
 			JSON.stringify(next.estimate) !== JSON.stringify(old.estimate) ||
 			JSON.stringify(next.actual) !== JSON.stringify(old.actual) ||

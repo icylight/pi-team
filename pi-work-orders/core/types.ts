@@ -36,6 +36,12 @@ export const DEFAULT_STATES: Record<StateRole, string> = {
 };
 
 /**
+ * 默认工单类型枚举：只做分类与筛选，不参与状态转换。
+ * 项目可在库里覆盖（meta.types），跟状态集同一套路。
+ */
+export const DEFAULT_TYPES: readonly string[] = ["需求单", "实施单", "bug 单"] as const;
+
+/**
  * 合法转换，按角色声明。
  * 阻塞只从「在做」进、解除回「在做」，所以它是在做的暂停子态，不记来源。
  */
@@ -138,6 +144,8 @@ export interface Order {
 	title: string;
 	/** 正文，markdown 文本；**以当前有效口径为准**，范围修订直接覆盖（旧内容留在 events 的理由里） */
 	body: string;
+	/** 工单类型，取值须在配置的枚举内；不分类就是 null */
+	type: string | null;
 	contents: OrderContent[];
 	/** 当前状态名（取值为项目声明的状态集之一） */
 	state: string;
@@ -181,6 +189,8 @@ export interface Meta {
 	requirement?: Requirement;
 	/** 状态集：角色 → 状态名 */
 	states?: Partial<Record<StateRole, string>>;
+	/** 工单类型枚举；不给就用默认三种，空数组表示这个项目不分类 */
+	types?: string[];
 	/** 转换表覆盖：角色 → 允许到达的角色；不给就用默认表 */
 	transitions?: Partial<Record<StateRole, StateRole[]>>;
 	/** ID 前缀，默认 T */
@@ -207,6 +217,7 @@ export interface CreateInput {
 	nextActors: string[];
 	/** 初始状态的角色，默认 claimable */
 	role?: StateRole;
+	type?: string | null;
 	dependsOn?: string[];
 	/** 开工前的估算（主动工时 / 墙钟 / 依据） */
 	estimate?: Partial<Estimate>;
@@ -219,6 +230,8 @@ export interface UpdateInput {
 	/** 换成谁：给一个就是收敛成单人，给多个就是重新指定备选 */
 	nextActors?: string[];
 	title?: string;
+	/** 改类型：省略保留，null 清空分类 */
+	type?: string | null;
 	/** 整段替换正文；空串或全空白视为「这次不改正文」，不会把正文清空 */
 	body?: string;
 	/** 追加一段正文（范围修订用这个），在 body 之后拼接；与本次其他字段同一次事务 */
@@ -242,6 +255,8 @@ export interface ListFilter {
 	state?: string;
 	/** 只看候选里包含这个名字的 */
 	nextActor?: string;
+	/** 只看某个类型；不在枚举内的名字直接报错 */
+	type?: string;
 	/** 只看依赖已解、可开工的 */
 	ready?: boolean;
 }

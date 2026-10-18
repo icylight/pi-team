@@ -21,9 +21,11 @@ description: 用本机 SQLite 工单库记录多会话协作的状态——建�
 
 | 动作 | 工具 |
 | --- | --- |
-| 建 | `orders_init` 建库（可同时写本轮需求）；`orders_create` 建单，正文写目标、交付物、边界、验收口径 |
-| 改 | `orders_update` 改状态/下一步/终止依据，范围修订直接用 `body` 覆盖（正文只留当前有效口径）；`orders_dep` 加删依赖 |
-| 查 | `orders_list`（默认未收口；`ready` 只看能开工的；`next` 只看等某人的；`state` 看某个状态；回看历史加 `history=true`）、`orders_show`、`orders_requirement` |
+| 建 | `orders_init` 建库（可同时写本轮需求）；`orders_create` 建单，正文写目标、交付物、边界、验收口径；`type` 可选，写类型给这条归个类 |
+| 改 | `orders_update` 改状态/下一步/终止依据/类型，范围修订直接用 `body` 覆盖（正文只留当前有效口径）；`orders_dep` 加删依赖 |
+| 查 | `orders_list`（默认未收口；`ready` 只看能开工的；`next` 只看等某人的；`state` 看某个状态；`type` 看某个类型；回看历史加 `history=true`）、`orders_show`、`orders_requirement` |
+
+类型枚举默认 `需求单 · 实施单 · bug 单`，存在库的 `meta.types` 里：建库时用 `orders_init` 的 `types` 一次写定，之后改要直接写库。写枚举外的类型会被拒，不填就是未分类。
 
 库默认在 `<项目>/.work-orders/`，随项目走、不进 git。
 
@@ -75,6 +77,7 @@ description: 用本机 SQLite 工单库记录多会话协作的状态——建�
 - 依赖不能成环、不能指向自己
 - 终态不可退出
 - 状态转换不在表里
+- 类型不在配置的枚举里（不确定就用 `orders_list` 看已有单的分类，或问配置方）
 - 下一步找谁要写角色名，不写会话 key（`1423-311c` 这种重启即失效）；拿不准用 `/orders doctor` 查
 
 并发改动带上手上的 `rev`，能拦住互相覆盖。

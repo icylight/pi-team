@@ -36,7 +36,7 @@ import {
 	openNotifications,
 	reconcileNotifications,
 } from "./core/notifications.ts";
-import { defaultDbPath, eventsOf, initLedger, openLedger, statesOf } from "./core/schema.ts";
+import { defaultDbPath, eventsOf, initLedger, openLedger, statesOf, typesOf } from "./core/schema.ts";
 import {
 	addDep,
 	countBlockedDownstream,
@@ -558,6 +558,11 @@ export default function (pi: ExtensionAPI) {
 			acceptance: Type.Optional(Type.String({ description: "什么算交付" })),
 			baseline: Type.Optional(Type.String({ description: "基线：从哪个提交或版本开工" })),
 			idPrefix: Type.Optional(Type.String({ description: "工单号前缀，默认 T" })),
+			types: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "工单类型枚举，默认 需求单 / 实施单 / bug 单；建库后要改就写库里的 meta.types",
+				}),
+			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			return run(() => {
@@ -572,9 +577,10 @@ export default function (pi: ExtensionAPI) {
 							}
 						: undefined,
 					idPrefix: params.idPrefix,
+					types: params.types,
 				});
 				try {
-					return `工单库已建：${dbPath}\n状态集：${Object.values(statesOf(db)).join(" · ")}`;
+					return `工单库已建：${dbPath}\n状态集：${Object.values(statesOf(db)).join(" · ")}\n类型：${typesOf(db).join(" · ")}`;
 				} finally {
 					db.close();
 				}
@@ -607,6 +613,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			next: Type.Optional(Type.String({ description: "只看下一步找这个名字的工单" })),
 			state: Type.Optional(Type.String({ description: "只看某个状态；终态也算命中" })),
+			type: Type.Optional(Type.String({ description: "只看某个工单类型" })),
 			ready: Type.Optional(Type.Boolean({ description: "只看依赖已解、可开工的" })),
 			history: Type.Optional(Type.Boolean({ description: "回看历史时用：把已收口与已取消也列出来（默认不列）" })),
 		}),
@@ -616,13 +623,13 @@ export default function (pi: ExtensionAPI) {
 					const filter = {
 						history: params.history,
 						state: params.state?.trim() || undefined,
+						type: params.type?.trim() || undefined,
 						nextActor: params.next?.trim() || undefined,
 						ready: params.ready,
 					};
 					if (params.ready) {
-						const rows = readyOrders(db).filter(
-							(o) => !filter.nextActor || o.nextActors.includes(filter.nextActor),
-						);
+						// 可开工的也走 listOrders：类型与名字的校验跟普通列表一致
+						const rows = listOrders(db, { ready: true, nextActor: filter.nextActor, type: filter.type });
 						const hint = rows.length ? undefined : listHint(db, { ...filter, ready: false });
 						return [formatList(rows, "可开工"), hint].filter(Boolean).join("\n");
 					}
@@ -681,6 +688,11 @@ export default function (pi: ExtensionAPI) {
 					description: "初始状态角色：claimable（默认）/ active（接了就直接在做）",
 				}),
 			),
+			type: Type.Optional(
+				Type.String({
+					description: "工单类型，必须是配置的枚举之一（默认 需求单 / 实施单 / bug 单）；不填表示不分类",
+				}),
+			),
 			dependsOn: Type.Optional(Type.Array(Type.String({ description: "上游工单号" }))),
 			estimateActiveMin: Type.Optional(
 				Type.Number({ description: "预估主动工时（分钟）：真正在干的时间，不含等待" }),
@@ -707,6 +719,7 @@ export default function (pi: ExtensionAPI) {
 							contents: params.contents,
 							nextActors: params.nextActors,
 							role: params.role as StateRole | undefined,
+							type: params.type,
 							dependsOn: params.dependsOn,
 							estimate: {
 								activeMin: params.estimateActiveMin,
@@ -735,6 +748,7 @@ export default function (pi: ExtensionAPI) {
 			id: Type.String({ description: "工单号" }),
 			reason: Type.String({ description: "为什么这么改（必填）" }),
 			state: Type.Optional(Type.String({ description: "目标状态" })),
+			type: Type.Optional(Type.String({ description: "改工单类型，取值须在配置的枚举内；传空串清空分类" })),
 			nextActors: Type.Optional(
 				Type.Array(Type.String(), { description: "改成谁：给一个就是这个人接手，给多个就是重新指定备选" }),
 			),
@@ -782,6 +796,7 @@ export default function (pi: ExtensionAPI) {
 						params.state != null ||
 						params.nextActors != null ||
 						params.title != null ||
+						params.type != null ||
 						body != null ||
 						append != null ||
 						params.contents !== undefined ||
@@ -804,6 +819,8 @@ export default function (pi: ExtensionAPI) {
 									state: params.state,
 									nextActors: params.nextActors,
 									title: params.title,
+									// 空串是「清空分类」，undefined 是「这次不改」
+									type: params.type === "" ? null : params.type,
 									body,
 									appendBody: append,
 									contents: params.contents,

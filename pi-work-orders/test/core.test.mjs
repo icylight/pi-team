@@ -443,6 +443,7 @@ test("v2 的库打开时逐版升级，数据不动", () => {
 	// 退回 v2 结构：移除 v3 之后的列与 events 表，只操作临时测试库。
 	// 新增列时要一并退掉，否则升级路径里的 ADD COLUMN 会撞上已存在的列。
 	for (const column of [
+		"type",
 		"contents",
 		"estimate_active_min",
 		"estimate_wall_min",

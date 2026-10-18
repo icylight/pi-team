@@ -249,6 +249,7 @@ test("v3 升级仅加空入口，正文、状态、依赖、事件及版本号�
 	// 否则之后的 ADD COLUMN 会撞上已存在的列。
 	db.exec("ALTER TABLE orders DROP COLUMN contents;");
 	for (const column of [
+		"type",
 		"estimate_active_min",
 		"estimate_wall_min",
 		"estimate_basis",

@@ -28,8 +28,9 @@ function agingEvent(db, orderId, minutes) {
 	);
 }
 
-/** 退回 v4 结构：v5 的工序列要整批退掉，否则升级时 ADD COLUMN 会撞已存在的列 */
+/** 退回 v4 结构：v5 之后加的列要整批退掉，否则升级时 ADD COLUMN 会撞已存在的列 */
 const V5_COLUMNS = [
+	"type",
 	"estimate_active_min",
 	"estimate_wall_min",
 	"estimate_basis",

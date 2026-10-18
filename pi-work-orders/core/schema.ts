@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
 	DEFAULT_STATES,
 	DEFAULT_TRANSITIONS,
+	DEFAULT_TYPES,
 	type EventKind,
 	LedgerError,
 	type Meta,
@@ -22,7 +23,7 @@ import {
 	WAITING_ROLES,
 } from "./types.ts";
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export const DEFAULT_DB_DIR = ".work-orders";
 export const DEFAULT_DB_NAME = "work-orders.sqlite";
 
@@ -38,6 +39,7 @@ CREATE TABLE orders (
   title         TEXT NOT NULL,
   body          TEXT NOT NULL DEFAULT '',
   contents      TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(contents) AND json_type(contents) = 'array'),
+  type          TEXT,
   state         TEXT NOT NULL,
   next_actors   TEXT NOT NULL CHECK (json_valid(next_actors)),
   closing_basis TEXT,
@@ -82,6 +84,9 @@ CREATE INDEX events_order  ON events(order_id, id);
  * 只加表、加列，不重建：旧库里已有的数据不动。
  */
 const MIGRATIONS: Record<number, string> = {
+	5: `
+ALTER TABLE orders ADD COLUMN type TEXT;
+`,
 	4: `
 ALTER TABLE orders ADD COLUMN estimate_active_min INTEGER;
 ALTER TABLE orders ADD COLUMN estimate_wall_min   INTEGER;
@@ -186,6 +191,8 @@ export interface InitOptions {
 	requirement?: Omit<Requirement, "updatedAt">;
 	/** 覆盖默认状态集（角色 → 状态名） */
 	states?: Partial<Record<StateRole, string>>;
+	/** 覆盖默认类型枚举 */
+	types?: string[];
 	/** ID 前缀，默认 T */
 	idPrefix?: string;
 }
@@ -199,6 +206,7 @@ export function initLedger(dbPath: string, options: InitOptions = {}): DatabaseS
 	db.exec(DDL);
 	db.exec(`PRAGMA user_version=${SCHEMA_VERSION};`);
 	if (options.states) setMeta(db, "states", options.states);
+	if (options.types) setMeta(db, "types", options.types);
 	if (options.idPrefix) setMeta(db, "idPrefix", options.idPrefix);
 	if (options.requirement) setMeta(db, "requirement", { ...options.requirement, updatedAt: now() });
 	db.close();
@@ -242,6 +250,24 @@ export function roleOf(db: DatabaseSync, state: string): StateRole {
 
 export function stateOf(db: DatabaseSync, role: StateRole): string {
 	return statesOf(db)[role];
+}
+
+/**
+ * 工单类型枚举：库内配置优先，没配就用默认三种。
+ * 配成空数组表示这个项目不分类，此时任何 type 都不合法。
+ */
+export function typesOf(db: DatabaseSync): string[] {
+	return getMeta<string[]>(db, "types") ?? [...DEFAULT_TYPES];
+}
+
+/** 类型必须落在枚举里：写错名字当场报错，不让它悄悄变成第 N 种分类 */
+export function assertType(db: DatabaseSync, type: string): string {
+	const allowed = typesOf(db);
+	if (!allowed.includes(type)) {
+		const list = allowed.length ? allowed.join(" / ") : "（本项目未配置类型）";
+		throw new LedgerError(`未知工单类型：${type}（当前类型枚举：${list}）`);
+	}
+	return type;
 }
 
 /** 转换表：默认 + 库内覆盖 */

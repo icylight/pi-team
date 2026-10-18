@@ -616,3 +616,32 @@ test("定时提醒：库是会话起来之后才建的，建完下一轮就提",
 	assert.match(sent[0], /W01/);
 	handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, ctx);
 });
+
+test("工单类型：建库写枚举，建单与列表按枚举校验，空串清空", async () => {
+	const cwd = tmpProject();
+	const { tools } = mount();
+	const ctx = ctxFor(cwd);
+	assert.ok(tools.get("orders_create").parameters.properties.type);
+	assert.ok(tools.get("orders_update").parameters.properties.type);
+	assert.ok(tools.get("orders_list").parameters.properties.type);
+
+	const init = await call(tools, "orders_init", { types: ["需求", "缺陷"] }, ctx);
+	assert.match(init, /类型：需求 · 缺陷/);
+
+	const created = await call(tools, "orders_create", { title: "修登录", nextActors: ["dev"], type: "缺陷" }, ctx);
+	assert.match(created, /类型：缺陷｜状态：/);
+
+	// 默认枚举在项目里被覆盖后失效
+	const rejected = await call(tools, "orders_create", { title: "写错类型", nextActors: ["dev"], type: "需求单" }, ctx);
+	assert.match(rejected, /未知工单类型：需求单/);
+
+	await call(tools, "orders_create", { title: "加导出", nextActors: ["dev"], type: "需求" }, ctx);
+	const filtered = await call(tools, "orders_list", { type: "缺陷" }, ctx);
+	assert.match(filtered, /修登录/);
+	assert.doesNotMatch(filtered, /加导出/);
+
+	const cleared = await call(tools, "orders_update", { id: "T01", type: "", reason: "分错了" }, ctx);
+	assert.doesNotMatch(cleared.split("─")[0], /类型：/);
+	const stillOther = await call(tools, "orders_show", { id: "T02" }, ctx);
+	assert.match(stillOther, /类型：需求/);
+});

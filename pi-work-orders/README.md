@@ -107,6 +107,20 @@ cd pi-work-orders/web && npm install && npm run build
 
 阻塞是「在做」的暂停子态，只从在做进、解除回在做。
 
+## 工单类型
+
+```
+需求单 · 实施单 · bug 单
+```
+
+类型只做分类与筛选，不参与状态转换：不同类型不要求走不同状态机，同一个枚举对所有单都通用。
+
+- 写入校验：`orders_create` / `orders_update` 写 `type` 时必须在枚举内，写错名字当场报错，不让它悄悄变成第 N 种分类
+- 筛选：`orders_list` 的 `type` 只看某个类型；枚举外的名字同样报错，不静默返回空
+- 不填 `type` 就是未分类，旧库升上来也是未分类
+
+默认三种可在库里换（`meta.types`，字符串数组）：建库时用 `orders_init` 的 `types` 一次写定，之后改直接写库，跟 `meta.states` 同一套路。配成空数组表示这个项目不分类型，此时任何 `type` 都不合法。
+
 ## 强制规则
 
 机制能拦的（约定管不住的那些）：
@@ -197,12 +211,12 @@ cd pi-work-orders/web && npm install && npm run build
 
 | 工具 | 用途 |
 |---|---|
-| `orders_init` | 建库，同时写本轮需求（目标/边界/验收口径/基线） |
-| `orders_list` | 列单：默认未收口；`ready` 只看可开工的；`next` 只看等某人的；`state` 看某个状态（终态也算命中）；`history=true` 连终态一起列 |
+| `orders_init` | 建库，同时写本轮需求（目标/边界/验收口径/基线）与可选配置：编号前缀 `idPrefix`、类型枚举 `types` |
+| `orders_list` | 列单：默认未收口；`ready` 只看可开工的；`next` 只看等某人的；`state` 看某个状态（终态也算命中）；`type` 看某个类型；`history=true` 连终态一起列 |
 | `orders_show` | 看一条的正文、内容入口、依赖、下游、估算与实际、终止依据、现场（依赖进展 / 上游产物 / 能否占位 / 要不要重读），以及最近几次动作（默认 5 条） |
 | `orders_notifications` | 只读查询通知状态和原因，`id` 可限工单；返回最近更新的通知记录，不表示认领 |
-| `orders_create` | 建单，可带 `dependsOn`；`nextActors` 传名字数组（首选在前）；可选估算 `estimateActiveMin` / `estimateWallMin` / `estimateBasis` 与占位许可 `placeholderBasis` |
-| `orders_update` | 改状态或字段；`nextActors` 给多人就是重设备选。范围修订用 `body` 覆盖（正文只留当前有效口径，旧口径靠 `reason` 与动作记录留痕），`appendBody` 只用于补一小段。收口回填 `actualActiveMin` / `actualWallMin` / `actualWaitMin` / `deliveryVariance`。所有字段同一次事务，要么全成要么全不动；`body` 传空串表示这次不改正文 |
+| `orders_create` | 建单，可带 `dependsOn` 与 `type`（须在枚举内）；`nextActors` 传名字数组（首选在前）；可选估算 `estimateActiveMin` / `estimateWallMin` / `estimateBasis` 与占位许可 `placeholderBasis` |
+| `orders_update` | 改状态或字段；`nextActors` 给多人就是重设备选，`type` 传空串清空分类。范围修订用 `body` 覆盖（正文只留当前有效口径，旧口径靠 `reason` 与动作记录留痕），`appendBody` 只用于补一小段。收口回填 `actualActiveMin` / `actualWallMin` / `actualWaitMin` / `deliveryVariance`。所有字段同一次事务，要么全成要么全不动；`body` 传空串表示这次不改正文 |
 | `orders_dep` | 加/删依赖边 |
 | `orders_requirement` | 看/改本轮需求，交付前对照 |
 
@@ -225,7 +239,7 @@ actor 不写「目录名-pid」：它重启即变，落进 `nextActors` 就是�
 
 ```
 index.ts          扩展壳：库路径、actor 注入、派工唤醒、启动摘要、定时提醒、工具与命令
-core/types.ts     类型、默认状态集与转换表
+core/types.ts     类型与常量、默认状态集、默认类型枚举与转换表
 core/schema.ts    建库、逐版迁移、状态集读写、事件追加
 core/store.ts     增改查、依赖、校验、等待与停滞查询
 core/waiting.ts   等待分类与依赖解锁起点（只读）
@@ -240,7 +254,7 @@ skills/work-orders/   给 agent 看的操作约定
 
 ## 库结构
 
-`meta`（需求、状态集覆盖、编号前缀）、`orders`、`deps`、`events`。
+`meta`（需求、状态集与类型枚举的覆盖、编号前缀）、`orders`、`deps`、`events`。
 
 `events` 只追加：谁、何时、从什么状态到什么状态、为什么。它服务两件事：回答「这条挂了多久」（进当前状态的时刻），以及事后查谁改了。**`PI_WORK_ORDERS_NO_MIGRATE=1`：版本不匹配时只报错、不写库。这是应急手段，不是默认配置。**
 
@@ -274,6 +288,7 @@ peer 不在场或请求超时时，通知记录保留等待原因并恢复重试
 
 - 需求层只支持「一路一个」（库的元信息里一条）。要并行多个需求，得加需求表与 `req_id`。
 - 状态转换表可被 `meta.transitions` 覆盖，但还没有命令或工具去改它，目前只能直接写库。
+- 类型枚举同样只在建库时能一次写定（`orders_init` 的 `types`），改枚举得直接写库；类型不驱动状态机，也不能按类型做不同的必填校验。
 - 定时提醒只在一个会话里响：那个角色的会话没开，就没人在提。
 - 估算不拦：写 0 或负数会报错，但没写估算的单不会因为「没估」被拒；主动工时与墙钟的关系（墙钟应 ≥ 主动）也不校验——那是数据质量，不是硬规则。
 - 偏差只做减法，不判断好坏，也不跨单汇总（没有「哪类活总是估不准」的统计）。
