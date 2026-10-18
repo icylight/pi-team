@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { StateBadge } from "@/components/state-badge";
+import { ActorName } from "@/components/human-actor";
 import { Markdown } from "@/components/markdown";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ledgers, orderPage } from "@/lib/ledger";
@@ -74,7 +75,14 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 					<StateBadge state={view.state} states={states} />
 					<span>
 						下一步找谁：
-						{view.nextActors.length ? view.nextActors.join("、") : "（未指定）"}
+						{view.nextActors.length
+							? view.nextActors.map((name, i) => (
+									<span key={name}>
+										{i > 0 ? "、" : ""}
+										<ActorName name={name} />
+									</span>
+								))
+							: "（未指定）"}
 					</span>
 					{fields.map((f) => (
 						<span key={f}>· {f}</span>

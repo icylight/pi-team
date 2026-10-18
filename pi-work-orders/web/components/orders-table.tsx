@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ActorName } from "@/components/human-actor";
 import { StateBadge } from "@/components/state-badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { ListedOrder, StateRole, Waiting } from "../../core/types";
@@ -54,9 +55,18 @@ export function OrdersTable({
 							<TableCell className="text-sm">
 								{o.nextActors.length ? (
 									<>
-										{o.nextActors[0]}
+										<ActorName name={o.nextActors[0]} />
 										{o.nextActors.length > 1 ? (
-											<span className="text-muted-foreground">（备选 {o.nextActors.slice(1).join("、")}）</span>
+											<span className="text-muted-foreground">
+												（备选{" "}
+												{o.nextActors.slice(1).map((name, i) => (
+													<span key={name}>
+														{i > 0 ? "、" : ""}
+														<ActorName name={name} />
+													</span>
+												))}
+												）
+											</span>
 										) : null}
 									</>
 								) : (

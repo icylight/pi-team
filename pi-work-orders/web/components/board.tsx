@@ -1,6 +1,7 @@
 import { DispatchFacts } from "@/components/dispatch-facts";
 import type { DispatchOrder, DispatchSnapshot } from "../../core/dispatch";
 import Link from "next/link";
+import { ActorName, HUMAN_ACCENT, waitsForHuman } from "@/components/human-actor";
 import { waitedLabel } from "@/components/orders-table";
 import { roleOfState } from "@/components/state-badge";
 import { ROLES, TERMINAL_ROLES, type ListedOrder, type StateRole, type Waiting } from "../../core/types";
@@ -94,7 +95,7 @@ function Card({
 	return (
 		<Link
 			href={`/p/${slug}/o/${encodeURIComponent(order.id)}`}
-			className="block rounded-md border bg-background p-2.5 transition-colors hover:border-primary/60"
+			className={`block rounded-md border bg-background p-2.5 transition-colors hover:border-primary/60 ${waitsForHuman(order.nextActors) ? HUMAN_ACCENT : ""}`}
 		>
 			<div className="flex items-baseline justify-between gap-2">
 				<span className="font-mono text-xs text-muted-foreground">{order.id}</span>
@@ -102,7 +103,7 @@ function Card({
 			</div>
 			<p className="mt-1 line-clamp-2 text-sm leading-snug">{order.title}</p>
 			<p className="mt-1.5 text-xs text-muted-foreground">
-				下一步：{next ?? "未指定"}
+				下一步：{next ? <ActorName name={next} /> : "未指定"}
 				{blockedBy.length > 0 ? <span> · 卡在 {blockedBy.join(" ")}</span> : null}
 			</p>
 			{dispatch && observation ? <DispatchFacts item={dispatch} snapshot={observation} /> : null}

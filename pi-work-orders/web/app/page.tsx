@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ActorName } from "@/components/human-actor";
 import { attention, ledgers, openOrders, snapshot, type AttentionItem } from "@/lib/ledger";
 import { formatAgo, minutesSince, nowMs } from "@/lib/time";
 
@@ -64,7 +65,7 @@ function AttentionList({ items, now }: { items: AttentionItem[]; now: number }) 
 							{it.order.title}
 						</Link>
 						<span className="shrink-0 text-xs text-muted-foreground">
-							等 {it.order.nextActors[0] ?? "未指定"}
+							等 <ActorName name={it.order.nextActors[0] ?? "未指定"} />
 						</span>
 						<span
 							className={`shrink-0 font-mono text-xs ${it.stale ? "text-destructive" : "text-amber-600 dark:text-amber-400"}`}
