@@ -1494,7 +1494,13 @@ function memoryHasHandoff(id: string): boolean {
 			(entry.details as { handoff?: { id?: string } } | undefined)?.handoff?.id === id,
 	);
 }
-function wakeHandoff(): () => void {
+/** 交接唤醒默认关：不配 wakeOnHandoff 就只落消息，不替目标开一轮 */
+function handoffWakeEnabled(): boolean {
+	const cwd = ctxRef?.cwd ?? process.cwd();
+	return loadProjectConfig(path.join(cwd, CONFIG_DIR_NAME, CONFIG_FILE)).config.wakeOnHandoff === true;
+}
+function wakeHandoff(): (() => void) | undefined {
+	if (!handoffWakeEnabled()) return undefined;
 	const receiver = api;
 	const key = self?.key;
 	return () =>
@@ -1529,8 +1535,9 @@ function schedulePersistenceCheck(): void {
 					/* 确认端不可用时保留等待，由有效期和耐久租约限制重试。 */
 				}
 			} else if (!pending.woken && memoryHasHandoff(id)) {
+				const wake = wakeHandoff();
 				pending.woken = true;
-				wakeHandoff()();
+				wake?.();
 			}
 		}
 		schedulePersistenceCheck();
@@ -1552,8 +1559,9 @@ function confirmHandoff(handoff: NonNullable<PeerMessage["handoff"]>): void {
 	const pending = { handoff, woken: previous?.woken ?? false, until: Date.now() + 30_000 };
 	bufferedHandoffs.set(handoff.id, pending);
 	if (!pending.woken && memoryHasHandoff(handoff.id)) {
+		const wake = wakeHandoff();
 		pending.woken = true;
-		wakeHandoff()();
+		wake?.();
 	}
 	schedulePersistenceCheck();
 }

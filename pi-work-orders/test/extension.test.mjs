@@ -381,34 +381,49 @@ test("交付时唤醒复核人，收口时改为唤醒刚解锁的下游", async
 	assert.match(sent.at(-1).text, /T02/);
 });
 
-// ── 会话启动注入：不用 peer 也看得到 ────────────────
+// ── 会话启动注入：显式开 workOrders.digest 才有 ────────────────
 
-test("启动摘要点出等自己的、停滞的、可开工没人接的", async () => {
+test("没配 digest 时不注入摘要：有在等的单也不占上下文", async () => {
+	const cwd = tmpProject();
+	const { tools, handlers } = mount("qa");
+	const ctx = ctxFor(cwd);
+	await call(tools, "orders_init", {}, ctx);
+	await call(tools, "orders_create", { title: "等 qa 复核", nextActors: ["qa"] }, ctx);
+
+	const sections = {};
+	handlers.get("before_agent_start")({ systemPromptOptions: { sections } }, ctx);
+	assert.equal(sections.work_orders, undefined, "默认关：不配就不注入");
+});
+
+test("开 digest 后点出等自己的、停滞的、可开工没人接的", async () => {
 	const cwd = tmpProject();
 	const { tools, handlers } = mount("qa");
 	const ctx = ctxFor(cwd);
 	await call(tools, "orders_init", {}, ctx);
 	await call(tools, "orders_create", { title: "等 qa 复核", nextActors: ["qa"], role: "review" }, ctx);
 	await call(tools, "orders_create", { title: "等 dev 实现", nextActors: ["dev"] }, ctx);
+	writeProjectConfig(cwd, { workOrders: { digest: true } });
 
 	const sections = {};
 	handlers.get("before_agent_start")({ systemPromptOptions: { sections } }, ctx);
 	const text = sections.work_orders;
-	assert.ok(text, "有在等的单就该注入");
+	assert.ok(text, "开了就该注入");
 	assert.match(text, /等你的 1 条/);
 	assert.match(text, /T01 待复核/);
 	assert.match(text, /可开工还没人接：T02/, "刚建的单按「没人接」出现，不会立刻算停滞");
 });
 
-test("没有在等的人时不注入摘要，库没建也不报错", async () => {
+test("库没建时不报错", async () => {
 	const emptyProject = tmpProject();
 	const { handlers } = mount("qa");
+	writeProjectConfig(emptyProject, { workOrders: { digest: true } });
 	const sections = {};
 	handlers.get("before_agent_start")({ systemPromptOptions: { sections } }, ctxFor(emptyProject));
 	assert.equal(sections.work_orders, undefined, "库不存在时静默不注入");
 
 	const cwd = tmpProject();
 	const { tools, handlers: h2 } = mount("qa");
+	writeProjectConfig(cwd, { workOrders: { digest: true } });
 	await call(tools, "orders_init", {}, ctxFor(cwd));
 	const sections2 = {};
 	h2.get("before_agent_start")({ systemPromptOptions: { sections: sections2 } }, ctxFor(cwd));

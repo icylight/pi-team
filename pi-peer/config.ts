@@ -38,6 +38,8 @@ export interface RoleConfig {
 
 export interface ProjectConfig {
 	enabled?: boolean;
+	/** 收到工单交接时主动叫醒目标会话：默认关，显式写 true 才发那条唤醒消息 */
+	wakeOnHandoff?: boolean;
 	group?: {
 		name?: string;
 		roles?: Record<string, RoleConfig>;
@@ -49,7 +51,7 @@ export interface ProjectConfig {
 }
 
 /** pi-peer 读的顶层键；其余顶层键原样列出来，标明不由它读取 */
-const OWN_KEYS = new Set(["enabled", "group", "roles", "flow"]);
+const OWN_KEYS = new Set(["enabled", "wakeOnHandoff", "group", "roles", "flow"]);
 
 export interface LoadedConfig {
 	file: string;
@@ -89,6 +91,12 @@ export function loadProjectConfig(file: string): LoadedConfig {
 	if (record.enabled !== undefined) {
 		if (typeof record.enabled === "boolean") config.enabled = record.enabled;
 		else problems.push("enabled 要写 true 或 false，这一项被忽略（仍按启用处理）");
+	}
+
+	// 交接唤醒只认字面 true：写错了不叫醒（安静的默认不变）
+	if (record.wakeOnHandoff !== undefined) {
+		if (typeof record.wakeOnHandoff === "boolean") config.wakeOnHandoff = record.wakeOnHandoff;
+		else problems.push("wakeOnHandoff 要写 true 或 false，这一项被忽略（仍按不叫醒处理）");
 	}
 
 	// group 与简写 roles/flow 合并：group 优先，简写兜底（沿用原行为）
@@ -174,7 +182,16 @@ export type Origin =
 
 export interface ConfigItem {
 	/** identity=项目标签，role=本次生效的角色卡，roles=可用角色名单，flow=流程文档 */
-	key: "identity" | "role" | "roles" | "flow" | "model" | "thinkingLevel" | "canAssignRoles" | "canStartSessions";
+	key:
+		| "identity"
+		| "role"
+		| "roles"
+		| "flow"
+		| "model"
+		| "thinkingLevel"
+		| "canAssignRoles"
+		| "canStartSessions"
+		| "wakeOnHandoff";
 	label: string;
 	value: string;
 	origin: Origin;
@@ -262,6 +279,16 @@ export function describeConfig(
 			});
 		}
 	}
+
+	items.push({
+		key: "wakeOnHandoff",
+		label: "交接唤醒",
+		value: loaded.config.wakeOnHandoff === true ? "叫醒目标会话" : "只落消息，不叫醒",
+		origin:
+			loaded.config.wakeOnHandoff !== undefined
+				? { kind: "declared", detail: "wakeOnHandoff" }
+				: { kind: "absent", detail: "未配置，默认不叫醒" },
+	});
 
 	const flow = resolveFlow(options.cwd, loaded.config, dirName);
 	const flowLoaded = Boolean(readOptionalFile(flow.path));

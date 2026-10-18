@@ -207,6 +207,7 @@ test("声明齐全时，报告里每项都是「配置」来源，没有兜底�
 			"canStartSessions:declared",
 			"model:declared",
 			"thinkingLevel:declared",
+			"wakeOnHandoff:absent",
 			"flow:declared",
 		],
 	);

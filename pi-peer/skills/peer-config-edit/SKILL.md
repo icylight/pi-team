@@ -1,6 +1,6 @@
 ---
 name: peer-config-edit
-description: 编辑 pi-peer 的项目配置——`.pi/peer.json`（启用开关、项目标签、角色声明与默认模型/思考强度、流程文档、工单定时提醒 workOrders）、角色卡 `.pi/characters/*.md`、流程文档 `.pi/flows/*.md`。当用户说"改 peer 配置""加个角色""新建角色卡""改角色卡""配角色模型/思考强度""改项目标签""关掉 peer""配流程文档""配工单定时提醒""followRole"或用 /peer-config 看到兜底项想配实时使用。按自然语言意图落成配置：意图不完整时先追问改哪份、改成什么，然后直接写入并告知改动；不做写入前批准。
+description: 编辑 pi-peer 的项目配置——`.pi/peer.json`（启用开关、项目标签、角色声明与默认模型/思考强度、流程文档、工单定时提醒 workOrders）、角色卡 `.pi/characters/*.md`、流程文档 `.pi/flows/*.md`。当用户说"改 peer 配置""加个角色""新建角色卡""改角色卡""配角色模型/思考强度""改项目标签""关掉 peer""配流程文档""配工单定时提醒""followRole""交接唤醒""wakeOnHandoff"或用 /peer-config 看到兜底项想配实时使用。按自然语言意图落成配置：意图不完整时先追问改哪份、改成什么，然后直接写入并告知改动；不做写入前批准。
 ---
 
 # pi-peer 配置编辑（peer-config-edit）
@@ -46,7 +46,8 @@ description: 编辑 pi-peer 的项目配置——`.pi/peer.json`（启用开关�
     },
     "flow": ".pi/flows/example-project.md"
   },
-  "workOrders": { "followRole": "owner" }
+  "workOrders": { "followRole": "owner" },
+  "wakeOnHandoff": true
 }
 ```
 
@@ -58,7 +59,8 @@ description: 编辑 pi-peer 的项目配置——`.pi/peer.json`（启用开关�
 - `group.roles.<角色>.canAssignRoles`：布尔值，默认 `false`；设为 `true` 后该角色可用 `peer_assign_role` 给同项目其他空闲在线会话分配角色（包括具备调度权限的角色）。授权范围由用户决定，不能因派工自行授予
 - `group.roles.<角色>.canStartSessions`：布尔值，默认 `false`；用户明确授权后可为同项目其他空闲 agent 新建会话并派发任务，与 `canAssignRoles` 独立；行为与失败核实见包 README「让已有 agent 新建会话」
 - `group.flow`：流程文档路径
-- `workOrders.followRole`：工单定时提醒跟的角色名（**由 pi-work-orders 读，不由 pi-peer 读**；空 = 不开）。同段还收 `intervalMinutes` / `staleMinutes` / `repeatMinutes`（正数）
+- `wakeOnHandoff`：收到工单交接时是否额外注入一条唤醒消息把目标叫醒；**缺省关闭**，只把交接正文落进会话、不替目标开新一轮。写错时按关闭处理并告警
+- `workOrders.followRole`：工单定时提醒跟的角色名（**由 pi-work-orders 读，不由 pi-peer 读**；空 = 不开）。同段还收 `intervalMinutes` / `staleMinutes` / `repeatMinutes`（正数）与 `digest`（布尔，每轮往系统提示注入台账摘要，缺省关闭）
 
 顶层 `roles` / `flow` 是不包在 `group` 里的简写，`group.*` 优先。路径一律相对**声明它的配置文件**解析。
 

@@ -9,11 +9,17 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import workOrders from "../../pi-work-orders/index.ts";
 import peerExtension from "../index.ts";
 
-async function mounted(native = false) {
+async function mounted(native = false, options: { wake?: boolean } = {}) {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-integration-"));
 	fs.mkdirSync(path.join(cwd, ".pi", "characters"), { recursive: true });
 	for (const name of ["dev", "qa"])
 		fs.writeFileSync(path.join(cwd, ".pi", "characters", `${name}.md`), `${name} card`);
+	// 唤醒默认关；这里的用例验的是唤醒链路，所以要显式开
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "peer.json"),
+		JSON.stringify(options.wake === false ? {} : { wakeOnHandoff: true }),
+		"utf8",
+	);
 	const previousCwd = process.cwd();
 	const previousRoot = process.env.PI_PEER_ROOT;
 	const previousRole = process.env.PI_PEER_ROLE;
@@ -194,6 +200,19 @@ test("跨包: API 返回和模拟 message_end 不能代替真实文件，唤醒�
 		assert.equal(final.attempts, 3);
 		assert.equal(h.sent.length, 3);
 		assert.equal(h.runtime.wakes, 1);
+	} finally {
+		await h.close();
+	}
+});
+
+test("跨包: 默认不叫醒——交接落进会话并确认送达，但不注入唤醒消息", async () => {
+	const h = await mounted(true, { wake: false });
+	try {
+		await h.call("orders_create", { title: "synthetic quiet handoff", nextActors: ["dev"], actor: "owner" });
+		await waitFor(() => h.sent.length === 1);
+		await delay(300);
+		assert.equal(h.runtime.wakes, 0);
+		assert.equal(h.sent[0].options.triggerTurn, false, "交接正文不自己开一轮");
 	} finally {
 		await h.close();
 	}

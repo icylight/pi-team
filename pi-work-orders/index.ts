@@ -948,9 +948,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// 摘要区在系统提示里，每轮对话开始前重算一次。这是「只用台账、不用 peer」场景的兜底：
-	// 不管会话是谁开的、peer 在不在，只要打开项目就能看到有东西在等。
+	// 配了 workOrders.digest 才注入——默认安静，不让每个新会话一开就背一份台账。
 	pi.on("before_agent_start", (event, ctx) => {
 		const sections = event.systemPromptOptions.sections;
+		if (!loadWatchConfig(watchConfigFile(ctx.cwd)).config.digest) {
+			delete sections.work_orders;
+			return;
+		}
 		try {
 			const text = withDb(ctx, (db) => buildDigest(db, { me: actorName(), staleMinutes: staleMinutes() }).text);
 			if (text) sections.work_orders = `当前项目的工单台账（自动摘要，处理完用 orders_update 回写）：\n\n${text}`;

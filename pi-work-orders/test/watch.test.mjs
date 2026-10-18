@@ -75,6 +75,21 @@ test("workOrders 一段写在 peer.json 里，只认自己的字段", () => {
 	assert.deepEqual(problems, []);
 });
 
+test("digest 默认关，项目里写 true 才开", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "watch-cfg-"));
+	const file = path.join(dir, "peer.json");
+	const off = loadWatchConfig(file);
+	assert.equal(off.config.digest, false, "不配就不注入摘要");
+
+	writeConfig(file, { workOrders: { digest: true } });
+	assert.equal(loadWatchConfig(file).config.digest, true);
+
+	writeConfig(file, { workOrders: { digest: "on" } });
+	const bad = loadWatchConfig(file);
+	assert.equal(bad.config.digest, false);
+	assert.match(bad.problems[0], /workOrders\.digest/);
+});
+
 test("写错的字段被忽略并报出来，不悄悄按默认值跑", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "watch-cfg-"));
 	const file = path.join(dir, "peer.json");

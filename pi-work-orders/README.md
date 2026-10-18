@@ -138,7 +138,7 @@ cd pi-work-orders/web && npm install && npm run build
 
 单子卡在「建了没人接」上，机制上要管住两件事：让它可见，让它叫得动人。
 
-**一、每轮对话开始算一段摘要进系统提示**（`before_agent_start`）：等你的、停滞超阀值的、可开工没人接的。只用台账、不用 peer 也看得到——打开项目就知道有东西在等，自己就是执行者。库没建、或没在等人的单时不占上下文。
+**一、每轮对话开始算一段摘要进系统提示**（`before_agent_start`）：等你的、停滞超阀值的、可开工没人接的。**默认关**，项目里写 `workOrders.digest: true` 才注入——新会话不背一份台账，要看得自己开或用 `/orders`。开了之后库没建、或没在等人的单时也不占上下文。
 
 **二、耐久交接**：业务台账写入与通知分别呈现。每次写入后及会话存活期间每隔 5 秒扫描当前有效交接，将运行记录存到同项目 `.work-orders/notifications.sqlite`，不改原台账 schema。候选忙碌、离线或没有 peer 时保留 waiting 原因；会话恢复后重建与重试，不重新执行业务写入。任意加载台账的同项目会话均可接力，所有会话都退出时暂停，重启后恢复，不依赖 owner 人工重发。定时停滞提醒的 followRole 与这条恢复链路无关。
 
@@ -146,7 +146,7 @@ cd pi-work-orders/web && npm install && npm run build
 
 用 `orders_notifications(id="T01")` 查询等待、传输、已持久化、失效或失败及原因。sending 只代表传输租约；delivered 不代表已认领或完成。离线/忙碌不会消耗实际注入重试次数。注入或确认失败的实际尝试有界，达到上限记 failed/结果未知，须人工核实；不承诺跨通知库与会话日志的 exactly-once。旧版目标不支持消费协议时明确等待升级，不降级成无校验文本。
 
-**三、定时提醒跟着一个角色会话走**：配置里指定的角色（`followRole`）活着时，自己隔一会儿自查一次，有该提的单就把汇总注入成一条用户消息——等于它自己叫自己。会话不在就没人提，这是这个设计的边界。
+**三、定时提醒跟着一个角色会话走**：配置里指定的角色（`followRole`）活着时，自己隔一会儿自查一次，有该提的单就把汇总注入成一条用户消息——等于它自己叫自己。会话不在就没人提，这是这个设计的边界。不配 `followRole` 就不跑，是默认行为。
 
 提醒报四类读数，不只催「你落后了」：
 
@@ -159,12 +159,13 @@ cd pi-work-orders/web && npm install && npm run build
 
 同一条单命中多条时只留最紧迫的一条；估算从 80% 走到 100% 算两条信息，不会被 `repeatMinutes` 压掉。提醒文案里写明这是报读数不是催进度，避免收到的人只顾解释进度。
 
-配置就写在 pi-peer 的项目配置里，跟角色声明同一份（默认不开）：
+配置就写在 pi-peer 的项目配置里，跟角色声明同一份。自动出声的两项（摘要、定时提醒）都默认关，配哪项就只响哪项：
 
 ```json
 {
   "enabled": true,
   "workOrders": {
+    "digest": true,
     "followRole": "owner",
     "intervalMinutes": 15,
     "staleMinutes": 30,
@@ -174,8 +175,9 @@ cd pi-work-orders/web && npm install && npm run build
 }
 ```
 
-- 路径 `<项目>/.pi/peer.json`；不写 `workOrders` 一段就不跑
-- `followRole` —— 角色名，匹配角色实例名（`owner` 同时匹配 `owner-2`）
+- 路径 `<项目>/.pi/peer.json`；不写 `workOrders` 一段就静默，只落库不出声
+- `digest` —— 每轮把台账摘要注入系统提示，默认 `false`
+- `followRole` —— 定时提醒跟随的角色名，匹配角色实例名（`owner` 同时匹配 `owner-2`）；不写就不跑
 - `intervalMinutes` 隔多久看一次（15）｜ `staleMinutes` 等超多久算停滞（30）｜ `repeatMinutes` 同一条单最短隔多久再提（60）｜ `waitMinutes` 等依赖超多久要报（120）
 - 身份先问 pi-peer（`peer:whoami`），没装 peer 时退回会话名（`/peer-name`）
 - 配置在会话启动时读一次；改了重开会话生效。配错了当场提示，不静默退回默认值

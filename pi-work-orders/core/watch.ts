@@ -6,7 +6,10 @@
  *
  * 配置写在 pi-peer 的项目配置里（<项目>/.pi/peer.json）——定时提醒跟的就是 peer 的角色，
  * 项目有哪些角色、谁负责提，放一处看：
- *   { "enabled": true, "workOrders": { "followRole": "owner" } }
+ *   { "enabled": true, "workOrders": { "followRole": "owner", "digest": true } }
+ *
+ * AI(TAG): [工单通知] 自动出声的两种（定时提醒、系统提示摘要）都默认关，项目里显式写才开——
+ * 没人配就是安静台账，配了哪项就只响哪项。
  */
 
 import * as fs from "node:fs";
@@ -35,6 +38,8 @@ export interface WatchConfig {
 	repeatMinutes: number;
 	/** 等依赖超过多少分钟提醒一次（与停滞分开：等依赖不是谁没干活） */
 	waitMinutes: number;
+	/** 每轮对话把台账摘要注入系统提示：默认关，显式写 true 才注入 */
+	digest: boolean;
 }
 
 export const WATCH_DEFAULTS: WatchConfig = {
@@ -43,6 +48,7 @@ export const WATCH_DEFAULTS: WatchConfig = {
 	staleMinutes: STALE_MINUTES,
 	repeatMinutes: 60,
 	waitMinutes: WAIT_MINUTES,
+	digest: false,
 };
 
 /**
@@ -120,6 +126,10 @@ function applyConfig(target: WatchConfig, source: Record<string, unknown>, file:
 		if (value === undefined) continue;
 		if (typeof value === "number" && Number.isFinite(value) && value > 0) target[key] = value;
 		else problems.push(`${file}：workOrders.${key} 要写正数，这一项被忽略`);
+	}
+	if (source.digest !== undefined) {
+		if (typeof source.digest === "boolean") target.digest = source.digest;
+		else problems.push(`${file}：workOrders.digest 要写 true 或 false，这一项被忽略`);
 	}
 }
 
