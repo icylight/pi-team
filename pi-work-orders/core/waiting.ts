@@ -1,6 +1,6 @@
 /** 依赖等待是派生视图；解锁起点从现有事件推导，不写库或新增状态。 */
 import type { DatabaseSync } from "node:sqlite";
-import { enteredStateAt, roleOf, stateOf } from "./schema.ts";
+import { enteredStateAt, stateByTerminal, stateDef } from "./schema.ts";
 import type { DependencyBlocker, Order, Waiting } from "./types.ts";
 
 type EdgeEvent = { id: number; kind: string; note: string; at: string };
@@ -30,9 +30,12 @@ function dependencyIntervals(db: DatabaseSync, order: Order, current: Upstream[]
 }
 
 function releasedAt(db: DatabaseSync, order: Order, interval: Interval): string | undefined {
+	const done = stateByTerminal(db, "done");
+	// 没声明 done 终态：依赖永远不解锁，只认删除这条边
+	if (!done) return interval.end?.at;
 	const completed = db
 		.prepare("SELECT id,at FROM events WHERE order_id=? AND to_state=? ORDER BY id DESC LIMIT 1")
-		.get(interval.dep, stateOf(db, "done")) as { id: number; at: string } | undefined;
+		.get(interval.dep, done) as { id: number; at: string } | undefined;
 	if (completed) {
 		// 事件序号判先后，避免同一毫秒的完成、加依赖被误认为一次新的阻塞。
 		if (interval.start ? completed.id < interval.start.id : Date.parse(completed.at) <= Date.parse(order.createdAt)) {
@@ -43,7 +46,7 @@ function releasedAt(db: DatabaseSync, order: Order, interval: Interval): string 
 	const upstream = db.prepare("SELECT state,updated_at FROM orders WHERE id=?").get(interval.dep) as
 		| Upstream
 		| undefined;
-	if (upstream?.state === stateOf(db, "done")) {
+	if (upstream?.state === done) {
 		// 旧库没有完成事件时保守用行时间；不补造过去的解锁事件。
 		if (Date.parse(upstream.updated_at) <= Date.parse(interval.start?.at ?? order.createdAt)) return undefined;
 		return interval.end && Date.parse(interval.end.at) < Date.parse(upstream.updated_at)
@@ -62,7 +65,8 @@ function releasedAt(db: DatabaseSync, order: Order, interval: Interval): string 
  * 取三者的较晚者：进入当前状态的时刻、当前每个未完成前置的加边时刻、最近一次删边时刻。
  */
 function blockingSetSince(db: DatabaseSync, order: Order, entered: string, current: Upstream[]): string {
-	const unfinished = current.filter((up) => up.state !== stateOf(db, "done"));
+	const done = stateByTerminal(db, "done");
+	const unfinished = current.filter((up) => !done || up.state !== done);
 	let since = entered;
 	const addAt = db.prepare(
 		"SELECT at FROM events WHERE order_id=? AND kind='dep-add' AND note=? ORDER BY id DESC LIMIT 1",
@@ -86,30 +90,29 @@ export function describeWaiting(db: DatabaseSync, order: Order): Waiting {
 			"SELECT up.id,up.state,up.updated_at FROM deps d JOIN orders up ON up.id=d.depends_on WHERE d.order_id=? ORDER BY up.id",
 		)
 		.all(order.id) as Upstream[];
-	const done = stateOf(db, "done");
-	const cancelled = stateOf(db, "cancelled");
+	const done = stateByTerminal(db, "done");
+	const cancelled = stateByTerminal(db, "cancelled");
 	const dependencies: DependencyBlocker[] = current
-		.filter((up) => up.state !== done)
+		.filter((up) => !done || up.state !== done)
 		.map((up) => ({
 			id: up.id,
 			state: up.state,
 			cancelled: up.state === cancelled,
 		}));
-	const cancelledDeps = current.filter((up) => up.state === cancelled);
+	const cancelledDeps = cancelled ? current.filter((up) => up.state === cancelled) : [];
 	if (cancelledDeps.length) {
 		const firstCancellation = cancelledDeps
 			.map((up) => {
 				const added = db
 					.prepare("SELECT at FROM events WHERE order_id=? AND kind='dep-add' AND note=? ORDER BY id DESC LIMIT 1")
 					.get(order.id, up.id) as { at: string } | undefined;
-				const cancelledAt = enteredStateAt(db, up.id, cancelled) ?? up.updated_at;
+				const cancelledAt = (cancelled ? enteredStateAt(db, up.id, cancelled) : undefined) ?? up.updated_at;
 				return added ? later(cancelledAt, added.at) : cancelledAt;
 			})
 			.reduce((a, b) => (Date.parse(a) < Date.parse(b) ? a : b));
 		return { order, kind: "decision", dependencies, since: later(entered, firstCancellation) };
 	}
-	const role = roleOf(db, order.state);
-	const execution = role === "claimable" || role === "rework";
+	const execution = stateDef(db, order.state).execution === true;
 	if (execution && dependencies.length) {
 		// 起点跟当前这组前置走，不是无条件用「进入状态的时刻」：换过依赖边之后，
 		// 旧前置的时长不该继续算在新前置头上。

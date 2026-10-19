@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { eventsOf, initLedger, openLedger, SCHEMA_VERSION, stateOf, statesOf } from "../core/schema.ts";
+import { eventsOf, initLedger, openLedger, SCHEMA_VERSION, stateNames, statesOf } from "../core/schema.ts";
 import {
 	addDep,
 	appendBody,
@@ -45,8 +45,12 @@ const owner = { actor: "owner", reason: "测试" };
 
 test("建库后状态集是默认七态", () => {
 	const { db } = freshLedger();
+	assert.deepEqual(stateNames(db), ["待认领", "在做", "待复核", "被打回", "阻塞", "已收口", "已取消"]);
 	const states = statesOf(db);
-	assert.deepEqual(Object.values(states), ["待认领", "在做", "待复核", "被打回", "阻塞", "已收口", "已取消"]);
+	assert.deepEqual(
+		states.filter((state) => state.terminal).map((state) => state.terminal),
+		["done", "cancelled"],
+	);
 	db.close();
 });
 
@@ -56,14 +60,18 @@ test("工单自动编号，按前缀递增", () => {
 	const b = createOrder(db, { title: "第二条", nextActors: ["dev"] }, owner);
 	assert.equal(a.id, "T01");
 	assert.equal(b.id, "T02");
-	assert.equal(a.state, stateOf(db, "claimable"));
+	assert.equal(a.state, "待认领");
 	db.close();
 });
 
-test("转换按角色校验：待认领不能直接收口", () => {
+test("状态不设转换表：任何状态都能直接改到任何状态", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "x", nextActors: ["dev"] }, owner);
-	assert.throws(() => updateOrder(db, a.id, { state: stateOf(db, "done") }, owner), /不合法转换/);
+	const closed = updateOrder(db, a.id, { state: "已收口", closingBasis: "直接收口" }, owner);
+	assert.equal(closed.state, "已收口");
+	// 终态也能重开：不校验转换，只留事件
+	const reopened = updateOrder(db, a.id, { state: "在做", nextActors: ["dev"] }, { actor: "dev", reason: "重开" });
+	assert.equal(reopened.state, "在做");
 	db.close();
 });
 
@@ -71,47 +79,47 @@ test("认领走 待认领→在做，且一个角色同时只能有一条在做"
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "a", nextActors: ["dev"] }, owner);
 	const b = createOrder(db, { title: "b", nextActors: ["dev"] }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "接了" });
+	updateOrder(db, a.id, { state: "在做" }, { actor: "dev", reason: "接了" });
 	assert.throws(
-		() => updateOrder(db, b.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "再接一条" }),
+		() => updateOrder(db, b.id, { state: "在做" }, { actor: "dev", reason: "再接一条" }),
 		/已有在做的一条/,
 	);
 	// 换个人接就不冲突
-	updateOrder(db, b.id, { state: stateOf(db, "active"), nextActors: ["qa"] }, { actor: "qa", reason: "qa 接" });
+	updateOrder(db, b.id, { state: "在做", nextActors: ["qa"] }, { actor: "qa", reason: "qa 接" });
 	db.close();
 });
 
 test("阻塞只从在做进、解除回在做", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "a", nextActors: ["dev"] }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "接" });
-	updateOrder(db, a.id, { state: stateOf(db, "paused") }, { actor: "dev", reason: "等批准" });
-	assert.equal(getOrder(db, a.id).state, stateOf(db, "paused"));
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "批准了" });
-	assert.equal(getOrder(db, a.id).state, stateOf(db, "active"));
+	updateOrder(db, a.id, { state: "在做" }, { actor: "dev", reason: "接" });
+	updateOrder(db, a.id, { state: "阻塞" }, { actor: "dev", reason: "等批准" });
+	assert.equal(getOrder(db, a.id).state, "阻塞");
+	updateOrder(db, a.id, { state: "在做" }, { actor: "dev", reason: "批准了" });
+	assert.equal(getOrder(db, a.id).state, "在做");
 	db.close();
 });
 
 test("结单必须带终止依据，取消必须给理由", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "a", nextActors: ["dev"] }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "接" });
-	updateOrder(db, a.id, { state: stateOf(db, "review") }, { actor: "dev", reason: "交" });
+	updateOrder(db, a.id, { state: "在做" }, { actor: "dev", reason: "接" });
+	updateOrder(db, a.id, { state: "待复核" }, { actor: "dev", reason: "交" });
 	assert.throws(
-		() => updateOrder(db, a.id, { state: stateOf(db, "done") }, { actor: "qa", reason: "过了" }),
+		() => updateOrder(db, a.id, { state: "已收口" }, { actor: "qa", reason: "过了" }),
 		/结单必须给终止依据/,
 	);
 	const closed = updateOrder(
 		db,
 		a.id,
-		{ state: stateOf(db, "done"), closingBasis: "cargo test: 412 passed" },
+		{ state: "已收口", closingBasis: "cargo test: 412 passed" },
 		{ actor: "qa", reason: "过了" },
 	);
-	assert.equal(closed.state, stateOf(db, "done"));
+	assert.equal(closed.state, "已收口");
 	assert.equal(closed.closingBasis, "cargo test: 412 passed");
 
 	const b = createOrder(db, { title: "b", nextActors: ["dev"] }, owner);
-	assert.throws(() => updateOrder(db, b.id, { state: stateOf(db, "cancelled") }, owner), /取消必须给理由/);
+	assert.throws(() => updateOrder(db, b.id, { state: "已取消" }, owner), /取消必须给理由/);
 	db.close();
 });
 
@@ -135,19 +143,17 @@ test("ready 只列依赖已收口的", () => {
 		[up.id],
 	);
 
-	updateOrder(db, up.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "接" });
-	updateOrder(db, up.id, { state: stateOf(db, "review") }, { actor: "dev", reason: "交" });
-	updateOrder(db, up.id, { state: stateOf(db, "done"), closingBasis: "有证据" }, { actor: "qa", reason: "过" });
+	updateOrder(db, up.id, { state: "在做" }, { actor: "dev", reason: "接" });
+	updateOrder(db, up.id, { state: "待复核" }, { actor: "dev", reason: "交" });
+	updateOrder(db, up.id, { state: "已收口", closingBasis: "有证据" }, { actor: "qa", reason: "过" });
 	assert.deepEqual(
 		readyOrders(db).map((o) => o.id),
 		[down.id],
 	);
 
-	// 终态不可退出：已收口的不能重开
-	assert.throws(
-		() => updateOrder(db, up.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "重开" }),
-		/不合法转换/,
-	);
+	// 终态可以重开：状态不校验转换，重开的事实留在事件里
+	updateOrder(db, up.id, { state: "在做", nextActors: ["dev"] }, { actor: "dev", reason: "重开" });
+	assert.equal(getOrder(db, up.id).state, "在做");
 	db.close();
 });
 
@@ -156,12 +162,7 @@ test("上游取消时下游的依赖标成 stale，且不算可开工", () => {
 	const up = createOrder(db, { title: "上游", nextActors: ["dev"] }, owner);
 	const down = createOrder(db, { title: "下游", nextActors: ["dev"], dependsOn: [up.id] }, owner);
 
-	updateOrder(
-		db,
-		up.id,
-		{ state: stateOf(db, "cancelled"), closingBasis: "需求撤了" },
-		{ actor: "owner", reason: "不做了" },
-	);
+	updateOrder(db, up.id, { state: "已取消", closingBasis: "需求撤了" }, { actor: "owner", reason: "不做了" });
 
 	const view = getOrder(db, down.id);
 	assert.deepEqual(view.staleDeps, [up.id], "上游取消后下游应看到失效依赖");
@@ -185,9 +186,9 @@ test("取消上游时能数出受影响的下游", () => {
 test("revision 冲突会被拒绝", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "a", nextActors: ["dev"] }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "接" }, 1);
+	updateOrder(db, a.id, { state: "在做" }, { actor: "dev", reason: "接" }, 1);
 	assert.throws(
-		() => updateOrder(db, a.id, { state: stateOf(db, "review") }, { actor: "dev", reason: "交" }, 1),
+		() => updateOrder(db, a.id, { state: "待复核" }, { actor: "dev", reason: "交" }, 1),
 		/版本冲突.*请重读工单/s,
 	);
 	db.close();
@@ -205,12 +206,12 @@ test("正文修订用追加，不覆盖旧句", () => {
 test("追加与字段写入同事务：字段那步失败，正文与 revision 都不动", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "a", body: "## 目标\n做 A", nextActors: ["dev"] }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "接" });
-	updateOrder(db, a.id, { state: stateOf(db, "review") }, { actor: "dev", reason: "交" });
+	updateOrder(db, a.id, { state: "在做" }, { actor: "dev", reason: "接" });
+	updateOrder(db, a.id, { state: "待复核" }, { actor: "dev", reason: "交" });
 	const before = getOrder(db, a.id);
 	// 收口缺终止依据 → 走到写库前抛错；这次调用里还带着正文追加
 	assert.throws(
-		() => updateOrder(db, a.id, { appendBody: "## 范围修订\n追加这段", state: stateOf(db, "done") }, owner),
+		() => updateOrder(db, a.id, { appendBody: "## 范围修订\n追加这段", state: "已收口" }, owner),
 		/结单必须给终止依据/,
 	);
 	const after = getOrder(db, a.id);
@@ -272,7 +273,7 @@ test("候选去重、去空，且不能为空数组", () => {
 test("认领时收敛成执行者本人，备选不再挂着", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "a", nextActors: ["dev", "qa"] }, owner);
-	const claimed = updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "qa", reason: "dev 不在，qa 接" });
+	const claimed = updateOrder(db, a.id, { state: "在做" }, { actor: "qa", reason: "dev 不在，qa 接" });
 	assert.deepEqual(claimed.nextActors, ["qa"]);
 	db.close();
 });
@@ -281,14 +282,8 @@ test("在做状态不允许挂多个执行者", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "a", nextActors: ["dev"] }, owner);
 	assert.throws(
-		() =>
-			updateOrder(
-				db,
-				a.id,
-				{ state: stateOf(db, "active"), nextActors: ["dev", "qa"] },
-				{ actor: "dev", reason: "接" },
-			),
-		/只能有一个执行者/,
+		() => updateOrder(db, a.id, { state: "在做", nextActors: ["dev", "qa"] }, { actor: "dev", reason: "接" }),
+		/只许一个执行者/,
 	);
 	db.close();
 });
@@ -299,15 +294,15 @@ test("state 写终态时不叠加「跳过终态」，不用再带 history", () 
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "甲", nextActors: ["dev"] }, owner);
 	const b = createOrder(db, { title: "乙", nextActors: ["dev"] }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "review"), nextActors: ["qa"] }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "done"), closingBasis: "证据" }, owner);
+	updateOrder(db, a.id, { state: "在做" }, owner);
+	updateOrder(db, a.id, { state: "待复核", nextActors: ["qa"] }, owner);
+	updateOrder(db, a.id, { state: "已收口", closingBasis: "证据" }, owner);
 
 	// 曾经的病灶：默认排除终态 + state 限定终态 = 恒空
-	const closed = listOrders(db, { state: stateOf(db, "done") });
+	const closed = listOrders(db, { state: "已收口" });
 	assert.equal(closed.length, 1);
 	assert.equal(closed[0].id, a.id);
-	assert.equal(listOrders(db, { state: stateOf(db, "cancelled") }).length, 0);
+	assert.equal(listOrders(db, { state: "已取消" }).length, 0);
 
 	// 默认视图仍然不含终态
 	assert.deepEqual(
@@ -323,9 +318,9 @@ test("空结果给出可自救的提示，而不是静默空", () => {
 	assert.match(String(listHint(db, {})), /还没有任何工单/);
 
 	const a = createOrder(db, { title: "甲", nextActors: ["dev"] }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "review"), nextActors: ["qa"] }, owner);
-	updateOrder(db, a.id, { state: stateOf(db, "done"), closingBasis: "证据" }, owner);
+	updateOrder(db, a.id, { state: "在做" }, owner);
+	updateOrder(db, a.id, { state: "待复核", nextActors: ["qa"] }, owner);
+	updateOrder(db, a.id, { state: "已收口", closingBasis: "证据" }, owner);
 
 	const hint = listHint(db, { nextActor: "nobody" });
 	assert.match(String(hint), /库里共 1 条/);
@@ -353,11 +348,11 @@ test("等谁、等多久：正文改动不重置等待时钟", () => {
 	assert.ok(waitedMinutes(waitingOrders(db)[0]) >= 119);
 
 	// 进在做就不再是「等人动」
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "接了" });
+	updateOrder(db, a.id, { state: "在做" }, { actor: "dev", reason: "接了" });
 	assert.equal(waitingOrders(db).length, 0);
 
 	// 交付到待复核又要等人裁定
-	updateOrder(db, a.id, { state: stateOf(db, "review"), nextActors: ["qa"] }, { actor: "dev", reason: "交付" });
+	updateOrder(db, a.id, { state: "待复核", nextActors: ["qa"] }, { actor: "dev", reason: "交付" });
 	assert.deepEqual(
 		waitingOrders(db).map((w) => w.order.nextActors[0]),
 		["qa"],
@@ -410,9 +405,9 @@ test("下一步找谁拒绝会话 key：重启即失效的指向不许落库", (
 test("每次推进都留一条动作记录", () => {
 	const { db } = freshLedger();
 	const a = createOrder(db, { title: "甲", nextActors: ["dev"] }, { actor: "owner", reason: "派给 dev" });
-	updateOrder(db, a.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "接了" });
-	updateOrder(db, a.id, { state: stateOf(db, "review"), nextActors: ["qa"] }, { actor: "dev", reason: "做完了" });
-	updateOrder(db, a.id, { state: stateOf(db, "done"), closingBasis: "a.md" }, { actor: "qa", reason: "复核通过" });
+	updateOrder(db, a.id, { state: "在做" }, { actor: "dev", reason: "接了" });
+	updateOrder(db, a.id, { state: "待复核", nextActors: ["qa"] }, { actor: "dev", reason: "做完了" });
+	updateOrder(db, a.id, { state: "已收口", closingBasis: "a.md" }, { actor: "qa", reason: "复核通过" });
 
 	const history = eventsOf(db, a.id);
 	assert.deepEqual(

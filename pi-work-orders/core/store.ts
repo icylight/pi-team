@@ -17,19 +17,19 @@ import {
 	enteredStateAt,
 	getMeta,
 	idPrefixOf,
+	initialStateDef,
 	isTerminal,
 	isWaitingState,
 	logEvent,
 	now,
-	roleOf,
 	setMeta,
-	stateOf,
+	stateByTerminal,
+	stateDef,
 	statesOf,
-	transitionsOf,
+	terminalStateNames,
 } from "./schema.ts";
 import {
 	type ActorContext,
-	BASIS_REQUIRED,
 	type CreateInput,
 	type DeliveryDeviation,
 	ESTIMATE_WARN_RATIO,
@@ -40,9 +40,7 @@ import {
 	type Order,
 	type OrderView,
 	type Requirement,
-	ROLES,
 	STALE_MINUTES,
-	type StateRole,
 	type UpdateInput,
 	type Waiting,
 } from "./types.ts";
@@ -143,28 +141,30 @@ export function getOrder(db: DatabaseSync, id: string): OrderView {
 	const blocks = (db.prepare("SELECT order_id FROM deps WHERE depends_on=? ORDER BY order_id").all(id) as Row[]).map(
 		(r) => String(r.order_id),
 	);
-	const cancelled = stateOf(db, "cancelled");
+	const cancelled = stateByTerminal(db, "cancelled");
 	const staleDeps = dependsOn.filter((up) => {
 		const row = db.prepare("SELECT state FROM orders WHERE id=?").get(up) as Row | undefined;
-		return row ? String(row.state) === cancelled : false;
+		return row && cancelled ? String(row.state) === cancelled : false;
 	});
 	return { ...order, dependsOn, blocks, staleDeps };
 }
 
 export function listOrders(db: DatabaseSync, filter: ListFilter = {}): ListedOrder[] {
-	const states = statesOf(db);
 	const clauses: string[] = [];
 	const params: string[] = [];
 
 	// 「跳过终态」只在调用方没有明确指定状态时兜底：
 	// state 写已收口却因为默认排除终态而返回空，是查不动历史的根源。
 	if (filter.state) {
-		roleOf(db, filter.state); // 未声明的状态名直接报错，不静默返回空
+		stateDef(db, filter.state); // 未声明的状态名直接报错，不静默返回空
 		clauses.push("state = ?");
 		params.push(filter.state);
 	} else if (!filter.history) {
-		clauses.push("state <> ? AND state <> ?");
-		params.push(states.done, states.cancelled);
+		const terminal = terminalStateNames(db);
+		if (terminal.length) {
+			clauses.push(`state NOT IN (${terminal.map(() => "?").join(",")})`);
+			params.push(...terminal);
+		}
 	}
 	if (filter.nextActor) {
 		clauses.push("EXISTS (SELECT 1 FROM json_each(orders.next_actors) WHERE value = ?)");
@@ -177,10 +177,16 @@ export function listOrders(db: DatabaseSync, filter: ListFilter = {}): ListedOrd
 		params.push(type);
 	}
 	if (filter.ready) {
-		clauses.push(
-			"NOT EXISTS (SELECT 1 FROM deps d JOIN orders up ON up.id = d.depends_on WHERE d.order_id = orders.id AND up.state <> ?)",
-		);
-		params.push(states.done);
+		const done = stateByTerminal(db, "done");
+		if (done) {
+			clauses.push(
+				"NOT EXISTS (SELECT 1 FROM deps d JOIN orders up ON up.id = d.depends_on WHERE d.order_id = orders.id AND up.state <> ?)",
+			);
+			params.push(done);
+		} else {
+			// 没声明 done 终态：依赖永不解锁，只有无依赖的单算可开工
+			clauses.push("NOT EXISTS (SELECT 1 FROM deps d WHERE d.order_id = orders.id)");
+		}
 	}
 	const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 	const rows = db.prepare(`SELECT * FROM orders ${where} ORDER BY id`).all(...params) as Row[];
@@ -213,13 +219,18 @@ export function listHint(db: DatabaseSync, filter: ListFilter = {}): string | un
 	if (hit > 0) return undefined;
 	const total = listOrders(db, { history: true }).length;
 	if (total === 0) return "库里还没有任何工单（用 orders_create 建第一条）";
-	const states = statesOf(db);
-	const closed = db
-		.prepare("SELECT count(*) AS c FROM orders WHERE state IN (?,?)")
-		.get(states.done, states.cancelled) as { c: number };
+	const terminal = terminalStateNames(db);
+	const closed = terminal.length
+		? (db
+				.prepare(`SELECT count(*) AS c FROM orders WHERE state IN (${terminal.map(() => "?").join(",")})`)
+				.get(...terminal) as { c: number })
+		: { c: 0 };
 	const open = total - closed.c;
 	const parts = [`没有匹配的工单。库里共 ${total} 条：未收口 ${open} 条`];
-	if (closed.c > 0) parts.push(`已收口/已取消 ${closed.c} 条（看它们加 history=true 或写 state=已收口）`);
+	if (closed.c > 0) {
+		const done = stateByTerminal(db, "done");
+		parts.push(`已收口/已取消 ${closed.c} 条（看它们加 history=true${done ? ` 或写 state=${done}` : ""}）`);
+	}
 	return parts.join("，");
 }
 
@@ -238,9 +249,13 @@ export function staleWaiting(db: DatabaseSync, minutes = STALE_MINUTES, actor?: 
 	return waitingOrders(db, actor).filter((w) => w.kind !== "dependency" && Date.parse(w.since) < cutoff);
 }
 
-/** 可开工却没人接的：依赖已解、状态还是待认领 */
+/** 可开工却没人接的：依赖已解、状态还是「等人接手且没有人正在干」
+ */
 export function idleReady(db: DatabaseSync): Order[] {
-	const claimable = statesOf(db).claimable;
+	const claimable = statesOf(db).find(
+		(state) => state.waiting && state.execution && !state.timing && !state.terminal,
+	)?.name;
+	if (!claimable) return [];
 	return readyOrders(db).filter((o) => o.state === claimable);
 }
 
@@ -302,25 +317,18 @@ function nextId(db: DatabaseSync): string {
 	return `${prefix}${String(max + 1).padStart(2, "0")}`;
 }
 
-function assertTransition(db: DatabaseSync, fromState: string, toState: string): void {
-	const from = roleOf(db, fromState);
-	const to = roleOf(db, toState);
-	const allowed = transitionsOf(db)[from];
-	if (!allowed.includes(to)) {
-		const allowedNames = allowed.map((r) => stateOf(db, r)).join(" / ") || "（终态）";
-		throw new LedgerError(`不合法转换：${fromState} → ${toState}（${from} 只能到 ${allowedNames}）`);
-	}
-}
-
-/** 一个角色同一时刻只能有一条在做：进入在做前检查名下有没有别的 */
+/** 只允许一个执行者的状态下，同一人不能同时握两条 */
 function assertSingleActive(db: DatabaseSync, id: string | null, owner: string): void {
-	const active = stateOf(db, "active");
+	const owned = statesOf(db)
+		.filter((state) => state.singleOwner && !state.terminal)
+		.map((state) => state.name);
+	if (!owned.length) return;
 	const row = db
 		.prepare(
-			`SELECT id FROM orders WHERE state=? AND id IS NOT ?
+			`SELECT id FROM orders WHERE state IN (${owned.map(() => "?").join(",")}) AND id IS NOT ?
 			 AND EXISTS (SELECT 1 FROM json_each(orders.next_actors) WHERE value = ?)`,
 		)
-		.get(active, id ?? null, owner) as Row | undefined;
+		.get(...owned, id ?? null, owner) as Row | undefined;
 	if (row) throw new LedgerError(`${owner} 已有在做的一条（${String(row.id)}），先阻塞或收口再认领`);
 }
 
@@ -355,18 +363,16 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 	const contents = normalizeContents(input.contents);
 	assertActorNames(actors);
 
-	const states = statesOf(db);
-	const role: StateRole = input.role ?? "claimable";
-	if (!ROLES.includes(role)) throw new LedgerError(`未知角色：${role}`);
+	const state = input.state?.trim() ? stateDef(db, input.state.trim()) : initialStateDef(db);
 	const type = normalizeType(db, input.type);
 	const id = input.id?.trim() || nextId(db);
 	if (db.prepare("SELECT id FROM orders WHERE id=?").get(id)) {
 		throw new LedgerError(`工单号已存在：${id}`);
 	}
-	if (role === "active" && actors.length !== 1) {
-		throw new LedgerError("在做状态的工单只能有一个执行者");
+	if (state.singleOwner && actors.length !== 1) {
+		throw new LedgerError(`「${state.name}」只许一个执行者`);
 	}
-	if (role === "active") assertSingleActive(db, id, actors[0]);
+	if (state.singleOwner) assertSingleActive(db, id, actors[0]);
 
 	const deps = input.dependsOn ?? [];
 	assertDepsExist(db, id, deps);
@@ -390,7 +396,7 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 			input.body ?? "",
 			JSON.stringify(contents),
 			type,
-			states[role],
+			state.name,
 			JSON.stringify(actors),
 			estimate.activeMin,
 			estimate.wallMin,
@@ -406,7 +412,7 @@ export function createOrder(db: DatabaseSync, input: CreateInput, ctx: ActorCont
 			orderId: id,
 			actor: ctx.actor,
 			kind: "create",
-			toState: states[role],
+			toState: state.name,
 			note: ctx.reason,
 		});
 		for (const dep of deps) {
@@ -445,9 +451,9 @@ export function updateOrder(
 	if (patch.appendBody != null && !section) throw new LedgerError("追加内容不能为空");
 
 	const targetState = patch.state ?? old.state;
-	const nextRole = roleOf(db, targetState);
-	// 认领＝把状态推到「在做」；这时执行者就是操作者本人，不用再手传
-	const claiming = nextRole === "active" && old.state !== targetState;
+	const nextDef = stateDef(db, targetState);
+	// 认领＝推到只许一个执行者的状态；这时执行者就是操作者本人，不用再手传
+	const claiming = nextDef.singleOwner === true && old.state !== targetState;
 	const nextActors = patch.nextActors ? normalizeActors(patch.nextActors) : claiming ? [ctx.actor] : old.nextActors;
 	if (patch.nextActors) assertActorNames(nextActors);
 
@@ -492,17 +498,22 @@ export function updateOrder(
 			patch.placeholderBasis === undefined ? old.placeholderBasis : patch.placeholderBasis?.trim() || null,
 	};
 
-	if (next.state !== old.state) assertTransition(db, old.state, next.state);
-	if (nextRole === "active") {
+	if (nextDef.singleOwner) {
 		if (nextActors.length !== 1) {
-			throw new LedgerError("在做状态的工单只能有一个执行者（换人就给一个名字）");
+			throw new LedgerError(`「${nextDef.name}」只许一个执行者（换人就给一个名字）`);
 		}
 		if (next.state !== old.state || nextActors[0] !== old.nextActors[0]) {
 			assertSingleActive(db, id, nextActors[0]);
 		}
 	}
-	if (BASIS_REQUIRED.includes(nextRole) && !next.closingBasis?.trim()) {
-		throw new LedgerError(nextRole === "done" ? "结单必须给终止依据（证据指针）" : "取消必须给理由或取代它的单号");
+	if (nextDef.needsBasis && !next.closingBasis?.trim()) {
+		throw new LedgerError(
+			nextDef.terminal === "done"
+				? "结单必须给终止依据（证据指针）"
+				: nextDef.terminal === "cancelled"
+					? "取消必须给理由或取代它的单号"
+					: `推进到「${nextDef.name}」必须给终止依据`,
+		);
 	}
 
 	db.exec("BEGIN IMMEDIATE;");
@@ -607,9 +618,10 @@ export function countBlockedDownstream(db: DatabaseSync, id: string): number {
 
 // ── 估算与实际：进度、偏差、依赖产物 ────────────────
 
-/** 开工时刻：最近一次进入「在做」，没有就按建单时刻。估算进度从这里起算 */
+/** 开工时刻：最近一次进入「只许一个执行者」的状态，没有就按建单时刻。估算进度从这里起算 */
 export function startedAt(db: DatabaseSync, order: Order): string {
-	return enteredStateAt(db, order.id, stateOf(db, "active")) ?? order.createdAt;
+	const start = statesOf(db).find((state) => state.singleOwner && !state.terminal)?.name;
+	return (start ? enteredStateAt(db, order.id, start) : undefined) ?? order.createdAt;
 }
 
 /** 已过去的墙钟分钟（自开工起）。未开工的单按建单时刻，与「等多久」口径一致 */
@@ -623,8 +635,8 @@ export function elapsedMinutes(db: DatabaseSync, order: Order, at = Date.now()):
  */
 export function estimateStatus(db: DatabaseSync, order: Order, at = Date.now()): EstimateStatus {
 	const wall = order.estimate.wallMin;
-	const role = roleOf(db, order.state);
-	if (wall == null || (role !== "active" && role !== "paused")) return { level: "none", ratio: null, remainMin: null };
+	if (wall == null || stateDef(db, order.state).timing !== true)
+		return { level: "none", ratio: null, remainMin: null };
 	const used = elapsedMinutes(db, order, at);
 	const ratio = used / wall;
 	const remainMin = wall - used;
@@ -674,7 +686,8 @@ export interface UpstreamArtifact {
  * 派给下游时说清「能直接用的东西在哪」，省得它重跑一遍前置。
  */
 export function upstreamArtifacts(db: DatabaseSync, orderId: string, limit = 5): UpstreamArtifact[] {
-	const done = stateOf(db, "done");
+	const done = stateByTerminal(db, "done");
+	if (!done) return [];
 	const rows = db
 		.prepare(
 			`SELECT up.id, up.title, up.closing_basis, up.updated_at

@@ -11,7 +11,7 @@ import {
 } from "./notifications.ts";
 import { statesOf } from "./schema.ts";
 import { listOrders, readyOrders } from "./store.ts";
-import { isHumanActor, type ListedOrder, type StateRole } from "./types.ts";
+import { isHumanActor, type ListedOrder, type StateDef } from "./types.ts";
 
 export interface DispatchSession extends ObservedSession {
 	activeOrders: string[];
@@ -38,18 +38,21 @@ export interface DispatchSnapshot {
 }
 export function projectDispatch(
 	orders: readonly ListedOrder[],
-	states: Record<StateRole, string>,
+	states: readonly StateDef[],
 	readyIds: ReadonlySet<string>,
 	peers: PeerObservation,
 	currentHandoffs: ReadonlyMap<string, string>,
 	notifications: readonly Notification[],
 ): Pick<DispatchSnapshot, "sessions" | "orders"> {
+	const def = (name: string) => states.find((state) => state.name === name);
+	const done = states.find((state) => state.terminal === "done")?.name;
+	const cancelledState = states.find((state) => state.terminal === "cancelled")?.name;
 	const sessions: DispatchSession[] = peers.sessions.map((session) => ({
 		...session,
 		activeOrders: orders
 			.filter(
 				(o) =>
-					o.state === states.active &&
+					def(o.state)?.singleOwner === true &&
 					o.nextActors.some((actor) => actor === session.name || actor === session.roleSlot),
 			)
 			.map((o) => o.id),
@@ -59,15 +62,15 @@ export function projectDispatch(
 		sessions,
 		orders: orders.map((order) => {
 			const ready = readyIds.has(order.id);
-			const unresolved = order.dependsOn.filter((id) => byId.get(id)?.state !== states.done);
-			const cancelled = unresolved.some((id) => byId.get(id)?.state === states.cancelled);
+			const unresolved = order.dependsOn.filter((id) => !done || byId.get(id)?.state !== done);
+			const cancelled = cancelledState ? unresolved.some((id) => byId.get(id)?.state === cancelledState) : false;
 			const phase = currentHandoffs.get(order.id);
 			const records = notifications.filter((n) => n.orderId === order.id);
 			return {
 				id: order.id,
 				ready,
 				readiness: ready
-					? order.state === states.claimable || order.state === states.rework
+					? def(order.state)?.waiting && def(order.state)?.execution
 						? "依赖就绪，可接手"
 						: "依赖就绪，非待接手阶段"
 					: cancelled

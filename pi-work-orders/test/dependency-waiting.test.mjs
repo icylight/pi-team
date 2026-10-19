@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { buildDigest, renderStale } from "../core/digest.ts";
 import { formatList, formatWaiting, formatWaitingReason } from "../core/format.ts";
-import { initLedger, stateOf } from "../core/schema.ts";
+import { initLedger } from "../core/schema.ts";
 import {
 	addDep,
 	createOrder,
@@ -29,14 +29,14 @@ function fixture(t) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dependency-waiting-"));
 	const db = initLedger(path.join(dir, "test.sqlite"));
 	t.after(() => db.close());
-	const up = createOrder(db, { title: "上游", nextActors: ["dev"], role: "active" }, owner);
+	const up = createOrder(db, { title: "上游", nextActors: ["dev"], state: "在做" }, owner);
 	const down = createOrder(db, { title: "下游", nextActors: ["dev"], dependsOn: [up.id] }, owner);
 	return { db, up, down };
 }
 
 function complete(db, id) {
-	updateOrder(db, id, { state: stateOf(db, "review") }, owner);
-	updateOrder(db, id, { state: stateOf(db, "done"), closingBasis: "测试证据" }, owner);
+	updateOrder(db, id, { state: "待复核" }, owner);
+	updateOrder(db, id, { state: "已收口", closingBasis: "测试证据" }, owner);
 }
 
 function waiting(db, id) {
@@ -84,7 +84,7 @@ test("最后一个前置刚收口时重新开始接手等待，超过阈值才�
 
 test("多个前置取最后一个解锁时刻，不取第一个收口时刻", (t) => {
 	const { db, up, down } = fixture(t);
-	const second = createOrder(db, { title: "另一前置", nextActors: ["qa"], role: "active" }, owner);
+	const second = createOrder(db, { title: "另一前置", nextActors: ["qa"], state: "在做" }, owner);
 	addDep(db, down.id, second.id, owner);
 	t.mock.timers.tick(40 * MINUTE);
 	complete(db, up.id);
@@ -143,9 +143,9 @@ test("等待阶段晚于前置解锁时，按进入当前阶段的时刻计时",
 	t.mock.timers.tick(20 * MINUTE);
 	complete(db, up.id);
 	t.mock.timers.tick(40 * MINUTE);
-	updateOrder(db, down.id, { state: stateOf(db, "active") }, { actor: "dev", reason: "认领" });
-	updateOrder(db, down.id, { state: stateOf(db, "review") }, owner);
-	updateOrder(db, down.id, { state: stateOf(db, "rework") }, owner);
+	updateOrder(db, down.id, { state: "在做" }, { actor: "dev", reason: "认领" });
+	updateOrder(db, down.id, { state: "待复核" }, owner);
+	updateOrder(db, down.id, { state: "被打回" }, owner);
 	assert.equal(waiting(db, down.id).since, "2026-01-01T01:00:00.000Z");
 	assert.equal(staleWaiting(db).length, 0);
 });
@@ -153,7 +153,7 @@ test("等待阶段晚于前置解锁时，按进入当前阶段的时刻计时",
 test("上游取消不解锁下游，显示人工裁定并从取消时开始等待裁定", (t) => {
 	const { db, up, down } = fixture(t);
 	t.mock.timers.tick(65 * MINUTE);
-	updateOrder(db, up.id, { state: stateOf(db, "cancelled"), closingBasis: "前提撤销" }, owner);
+	updateOrder(db, up.id, { state: "已取消", closingBasis: "前提撤销" }, owner);
 	assert.ok(!readyOrders(db).some((item) => item.id === down.id));
 	assert.deepEqual(getOrder(db, down.id).staleDeps, [up.id]);
 	assert.equal(waiting(db, down.id).since, "2026-01-01T01:05:00.000Z");
@@ -169,10 +169,14 @@ test("上游取消不解锁下游，显示人工裁定并从取消时开始等�
 
 test("待复核与阻塞的人工处置，不因未完成依赖被隐藏", (t) => {
 	const { db, up } = fixture(t);
-	const review = createOrder(db, { title: "需要复核", nextActors: ["qa"], role: "review", dependsOn: [up.id] }, owner);
+	const review = createOrder(
+		db,
+		{ title: "需要复核", nextActors: ["qa"], state: "待复核", dependsOn: [up.id] },
+		owner,
+	);
 	const paused = createOrder(
 		db,
-		{ title: "需要解除阻塞", nextActors: ["owner"], role: "paused", dependsOn: [up.id] },
+		{ title: "需要解除阻塞", nextActors: ["owner"], state: "阻塞", dependsOn: [up.id] },
 		owner,
 	);
 	t.mock.timers.tick(65 * MINUTE);
@@ -181,19 +185,24 @@ test("待复核与阻塞的人工处置，不因未完成依赖被隐藏", (t) =
 	assert.ok(stale.includes(paused.id));
 });
 
-test("自定义状态名仍按角色判断依赖等待", (t) => {
+test("自定义状态名按声明的开关判断依赖等待", (t) => {
 	t.mock.timers.enable({ apis: ["Date"], now: START });
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dependency-states-"));
 	const db = initLedger(path.join(dir, "test.sqlite"), {
-		states: { claimable: "待接领", done: "验收结束", cancelled: "需求撤销" },
+		states: [
+			{ name: "待接领", waiting: true, execution: true, initial: true },
+			{ name: "在做", timing: true, singleOwner: true, execution: true },
+			{ name: "验收结束", terminal: "done", needsBasis: true },
+			{ name: "需求撤销", terminal: "cancelled", needsBasis: true },
+		],
 	});
 	t.after(() => db.close());
 	const up = createOrder(db, { title: "上游", nextActors: ["dev"] }, owner);
 	const down = createOrder(db, { title: "下游", nextActors: ["dev"], dependsOn: [up.id] }, owner);
 	t.mock.timers.tick(65 * MINUTE);
 	assert.ok(!staleWaiting(db).some((item) => item.order.id === down.id));
-	updateOrder(db, up.id, { state: stateOf(db, "active") }, owner);
-	complete(db, up.id);
+	updateOrder(db, up.id, { state: "在做" }, owner);
+	updateOrder(db, up.id, { state: "验收结束", closingBasis: "测试证据" }, owner);
 	assert.equal(waiting(db, down.id).since, "2026-01-01T01:05:00.000Z");
 });
 
@@ -201,7 +210,7 @@ test("后来加上已取消的前置，从加入这条依赖时开始等待裁�
 	const { db, up, down } = fixture(t);
 	removeDep(db, down.id, up.id, owner);
 	t.mock.timers.tick(20 * MINUTE);
-	updateOrder(db, up.id, { state: stateOf(db, "cancelled"), closingBasis: "前提撤销" }, owner);
+	updateOrder(db, up.id, { state: "已取消", closingBasis: "前提撤销" }, owner);
 	t.mock.timers.tick(45 * MINUTE);
 	addDep(db, down.id, up.id, owner);
 	assert.equal(waiting(db, down.id).since, "2026-01-01T01:05:00.000Z");
@@ -235,7 +244,7 @@ test("删旧加新换依赖：等依赖从新前置挂上算，同时保留整�
 	// 建单即依赖 up，等了 90 分钟
 	t.mock.timers.tick(90 * MINUTE);
 	// 换前置：删掉 up，换成另一条未完成前置
-	const other = createOrder(db, { title: "新前置", nextActors: ["qa"], role: "active" }, owner);
+	const other = createOrder(db, { title: "新前置", nextActors: ["qa"], state: "在做" }, owner);
 	removeDep(db, down.id, up.id, owner);
 	addDep(db, down.id, other.id, owner);
 
@@ -266,7 +275,7 @@ test("没换过依赖边时不出现两套时长", (t) => {
 test("换边后等依赖阈值重新起算：刚换上新前置的不会被当成等了两小时", (t) => {
 	const { db, up, down } = fixture(t);
 	t.mock.timers.tick(200 * MINUTE); // 远超 120m 阈值
-	const fresh = createOrder(db, { title: "新前置", nextActors: ["qa"], role: "active" }, owner);
+	const fresh = createOrder(db, { title: "新前置", nextActors: ["qa"], state: "在做" }, owner);
 	removeDep(db, down.id, up.id, owner);
 	addDep(db, down.id, fresh.id, owner);
 

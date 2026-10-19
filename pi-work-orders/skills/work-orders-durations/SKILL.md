@@ -19,7 +19,7 @@ sqlite3 -header "file:<项目>/.work-orders/work-orders.sqlite?mode=ro" "<SQL>"
 ## 数据依据
 
 - `events` 表每次动作一行；`kind IN ('create','state')` 的行带 `to_state` 和 `at`（ISO 时间戳），连续两行之间就是一段
-- 状态名由项目声明（`meta.states`，默认：待认领/在做/待复核/被打回/阻塞/已收口/已取消）。查询不按状态名过滤；按名字筛时先查 `SELECT value_json FROM meta WHERE key='states'` 确认实际用名
+- 状态名由项目声明（`meta.states` 是状态声明数组，默认：待认领/在做/待复核/被打回/阻塞/已收口/已取消）。查询不按状态名过滤；按名字筛时先查 `SELECT value_json FROM meta WHERE key='states'`，按数组里的 `name` 与 `terminal` 取实际用名
 - 终态（已收口/已取消）的「耗时」无意义——单已经停了，看阶段效率时排除这两行
 
 ## 查询
@@ -57,7 +57,7 @@ FROM orders o LEFT JOIN events e ON e.order_id=o.id AND e.kind='state'
 WHERE o.id='<单号>';
 ```
 
-查询 3 的终态名是默认状态集；项目覆盖过状态名时按 `meta.states` 替换。
+查询 3 的终态名取默认状态集；项目改过状态集时，从 `meta.states` 里找 `terminal` 为 `done` / `cancelled` 的状态名替换。
 
 ## 汇报口径
 

@@ -1,27 +1,26 @@
 import { Badge } from "@/components/ui/badge";
-import type { StateRole } from "../../core/types";
+import type { StateDef } from "../../core/types";
 
-/** 状态角色 → 徽记配色。同义同色：只要两者都是同一角色，颜色就一致。 */
-const ROLE_CLASS: Record<StateRole, string> = {
-	claimable: "bg-muted text-muted-foreground border-border",
-	active: "bg-primary/10 text-primary border-primary/20",
-	review: "bg-violet-500/10 text-violet-600 border-violet-500/20 dark:text-violet-400",
-	rework: "bg-destructive/10 text-destructive border-destructive/20",
-	paused: "bg-amber-500/10 text-amber-600 border-amber-500/20 dark:text-amber-400",
-	done: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 dark:text-emerald-400",
-	cancelled: "bg-muted text-muted-foreground border-border",
-};
-
-/** 状态名是项目自己声明的，配色得先反查角色 */
-export function roleOfState(states: Record<StateRole, string>, state: string): StateRole | undefined {
-	return (Object.keys(states) as StateRole[]).find((role) => states[role] === state);
+/** 状态能力开关 → 徽记配色。同一套开关组合颜色一致，与状态名无关。 */
+function toneOf(def: StateDef | undefined): string {
+	if (!def) return "border-border text-muted-foreground";
+	if (def.terminal === "done") return "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 dark:text-emerald-400";
+	if (def.terminal === "cancelled") return "bg-muted text-muted-foreground border-border";
+	if (def.timing) return "bg-amber-500/10 text-amber-600 border-amber-500/20 dark:text-amber-400";
+	if (def.singleOwner) return "bg-primary/10 text-primary border-primary/20";
+	if (def.execution) return "bg-destructive/10 text-destructive border-destructive/20";
+	if (def.waiting) return "bg-violet-500/10 text-violet-600 border-violet-500/20 dark:text-violet-400";
+	return "bg-muted text-muted-foreground border-border";
 }
 
-export function StateBadge({ state, states }: { state: string; states: Record<StateRole, string> }) {
-	const role = roleOfState(states, state);
-	const cls = role ? ROLE_CLASS[role] : "border-border text-muted-foreground";
+/** 状态名是项目自己声明的，配色按声明的开关算 */
+export function stateDefOf(states: readonly StateDef[], state: string): StateDef | undefined {
+	return states.find((def) => def.name === state);
+}
+
+export function StateBadge({ state, states }: { state: string; states: readonly StateDef[] }) {
 	return (
-		<Badge variant="outline" className={cls}>
+		<Badge variant="outline" className={toneOf(stateDefOf(states, state))}>
 			{state}
 		</Badge>
 	);

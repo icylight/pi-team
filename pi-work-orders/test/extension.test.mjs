@@ -400,7 +400,7 @@ test("开 digest 后点出等自己的、停滞的、可开工没人接的", asy
 	const { tools, handlers } = mount("qa");
 	const ctx = ctxFor(cwd);
 	await call(tools, "orders_init", {}, ctx);
-	await call(tools, "orders_create", { title: "等 qa 复核", nextActors: ["qa"], role: "review" }, ctx);
+	await call(tools, "orders_create", { title: "等 qa 复核", nextActors: ["qa"], state: "待复核" }, ctx);
 	await call(tools, "orders_create", { title: "等 dev 实现", nextActors: ["dev"] }, ctx);
 	writeProjectConfig(cwd, { workOrders: { digest: true } });
 

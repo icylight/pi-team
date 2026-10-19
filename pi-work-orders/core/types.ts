@@ -5,64 +5,53 @@
  * 换 harness 或加 CLI 壳时可直接复用。pi 相关代码只在 index.ts。
  */
 
-/** 状态角色——工具只认角色，不认状态名；状态名由项目在库里声明 */
-export type StateRole = "claimable" | "active" | "review" | "rework" | "paused" | "done" | "cancelled";
-
-export const ROLES: readonly StateRole[] = [
-	"claimable",
-	"active",
-	"review",
-	"rework",
-	"paused",
-	"done",
-	"cancelled",
-] as const;
-
-/** 终态角色：依赖判定用；done 解锁下游，cancelled 让下游待裁决 */
-export const TERMINAL_ROLES: readonly StateRole[] = ["done", "cancelled"] as const;
+/** 终态语义：done 解锁下游，cancelled 让下游进待裁决 */
+export type TerminalKind = "done" | "cancelled";
 
 /**
- * 默认状态集：角色 → 状态名。
- * 项目可在库里覆盖（meta.states），工具按角色查名字。
+ * 状态声明：项目自己定状态名与能力开关。
+ *
+ * 工具只读这些开关，不认状态名——项目可以加「待部署」「灰度中」这类自己的状态，
+ * 只要声明它算不算等人、算不算在计时、算不算完。
  */
-export const DEFAULT_STATES: Record<StateRole, string> = {
-	claimable: "待认领",
-	active: "在做",
-	review: "待复核",
-	rework: "被打回",
-	paused: "阻塞",
-	done: "已收口",
-	cancelled: "已取消",
-};
+export interface StateDef {
+	/** 状态名，项目的工单库里用的就是这个字面量 */
+	name: string;
+	/** 等人接手或裁定：停滞计时、待办视图按它挑单 */
+	waiting?: boolean;
+	/** 执行期内：墙钟在走，估算进度按它提醒 */
+	timing?: boolean;
+	/** 只许一个执行者：推进到这个状态时，执行者自动落成本次操作者 */
+	singleOwner?: boolean;
+	/** 执行视角：依赖没解就算阻塞，不催办 */
+	execution?: boolean;
+	/** 终态：done 解锁下游；cancelled 让下游进待裁决 */
+	terminal?: TerminalKind;
+	/** 推进到这个状态必须给终止依据：结单给证据，取消给理由 */
+	needsBasis?: boolean;
+	/** 建单不指定状态时的落点；没标就用第一个非终态状态 */
+	initial?: boolean;
+}
 
 /**
- * 默认工单类型枚举：只做分类与筛选，不参与状态转换。
+ * 默认状态集：沿用「待认领 → 在做 → 待复核 → 收口」这套最常用的划分。
+ * 项目可在库里整体替换（meta.states），不必与这里同名或同数量。
+ */
+export const DEFAULT_STATE_DEFS: readonly StateDef[] = [
+	{ name: "待认领", waiting: true, execution: true, initial: true },
+	{ name: "在做", timing: true, singleOwner: true, execution: true },
+	{ name: "待复核", waiting: true },
+	{ name: "被打回", waiting: true, execution: true },
+	{ name: "阻塞", waiting: true, timing: true },
+	{ name: "已收口", terminal: "done", needsBasis: true },
+	{ name: "已取消", terminal: "cancelled", needsBasis: true },
+];
+
+/**
+ * 默认工单类型枚举：只做分类与筛选，不参与状态流转。
  * 项目可在库里覆盖（meta.types），跟状态集同一套路。
  */
 export const DEFAULT_TYPES: readonly string[] = ["需求单", "实施单", "bug 单"] as const;
-
-/**
- * 合法转换，按角色声明。
- * 阻塞只从「在做」进、解除回「在做」，所以它是在做的暂停子态，不记来源。
- */
-export const DEFAULT_TRANSITIONS: Record<StateRole, readonly StateRole[]> = {
-	claimable: ["active", "cancelled"],
-	active: ["review", "paused", "cancelled"],
-	paused: ["active", "cancelled"],
-	review: ["done", "rework", "cancelled"],
-	rework: ["active", "cancelled"],
-	done: [],
-	cancelled: [],
-};
-
-/** 哪些角色在推进时必须给出终止依据（结单要证据，取消要理由） */
-export const BASIS_REQUIRED: readonly StateRole[] = ["done", "cancelled"] as const;
-
-/**
- * 「在等人动」的角色：这些状态的单坐落在某个人名下，等人接手、修复、裁定或解除。
- * 「在做」不算——有人正在干；「已收口/已取消」不算——没人需要动。
- */
-export const WAITING_ROLES: readonly StateRole[] = ["claimable", "rework", "review", "paused"] as const;
 
 /** 催办阈值（分钟）：等超过这个时长还没动，就算停滞，进提醒与扫描 */
 export const STALE_MINUTES = 30;
@@ -187,12 +176,10 @@ export interface OrderView extends Order {
 export interface Meta {
 	/** 需求：目标、边界、验收口径、基线 */
 	requirement?: Requirement;
-	/** 状态集：角色 → 状态名 */
-	states?: Partial<Record<StateRole, string>>;
+	/** 状态集：项目自己声明的状态与能力开关；不给就用默认集 */
+	states?: StateDef[];
 	/** 工单类型枚举；不给就用默认三种，空数组表示这个项目不分类 */
 	types?: string[];
-	/** 转换表覆盖：角色 → 允许到达的角色；不给就用默认表 */
-	transitions?: Partial<Record<StateRole, StateRole[]>>;
 	/** ID 前缀，默认 T */
 	idPrefix?: string;
 }
@@ -215,8 +202,8 @@ export interface CreateInput {
 	body?: string;
 	contents?: OrderContent[];
 	nextActors: string[];
-	/** 初始状态的角色，默认 claimable */
-	role?: StateRole;
+	/** 初始状态名；省略落声明的初始状态 */
+	state?: string;
 	type?: string | null;
 	dependsOn?: string[];
 	/** 开工前的估算（主动工时 / 墙钟 / 依据） */

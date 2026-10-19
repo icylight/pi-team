@@ -2,25 +2,23 @@
  * 库的建立、打开与约定读取。
  *
  * schema 变更走 PRAGMA user_version：加字段就加一版，打开时比对。
- * 状态集与转换表允许项目在库里覆盖（meta.states / meta.transitions），
- * 工具按「角色」工作，不认状态名。
+ * 状态集由项目在库里声明（meta.states），工具只读状态自带的开关，不认状态名。
+ * 状态之间没有转换表：任何状态都能改到任何状态，只记事件。
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-	DEFAULT_STATES,
-	DEFAULT_TRANSITIONS,
+	DEFAULT_STATE_DEFS,
 	DEFAULT_TYPES,
 	type EventKind,
 	LedgerError,
 	type Meta,
 	type OrderEvent,
 	type Requirement,
-	ROLES,
-	type StateRole,
-	WAITING_ROLES,
+	type StateDef,
+	type TerminalKind,
 } from "./types.ts";
 
 export const SCHEMA_VERSION = 6;
@@ -189,8 +187,8 @@ function migrate(db: DatabaseSync, found: number, readOnly: boolean): void {
 export interface InitOptions {
 	/** 需求：接到什么活、什么算交付 */
 	requirement?: Omit<Requirement, "updatedAt">;
-	/** 覆盖默认状态集（角色 → 状态名） */
-	states?: Partial<Record<StateRole, string>>;
+	/** 覆盖默认状态集（自己声明状态与能力开关） */
+	states?: StateDef[];
 	/** 覆盖默认类型枚举 */
 	types?: string[];
 	/** ID 前缀，默认 T */
@@ -205,7 +203,10 @@ export function initLedger(dbPath: string, options: InitOptions = {}): DatabaseS
 	db.exec("PRAGMA foreign_keys=ON;");
 	db.exec(DDL);
 	db.exec(`PRAGMA user_version=${SCHEMA_VERSION};`);
-	if (options.states) setMeta(db, "states", options.states);
+	if (options.states) {
+		normalizeStates(options.states);
+		setMeta(db, "states", options.states);
+	}
 	if (options.types) setMeta(db, "types", options.types);
 	if (options.idPrefix) setMeta(db, "idPrefix", options.idPrefix);
 	if (options.requirement) setMeta(db, "requirement", { ...options.requirement, updatedAt: now() });
@@ -231,25 +232,104 @@ export function setMeta(db: DatabaseSync, key: keyof Meta, value: unknown): void
 	).run(key, JSON.stringify(value), now());
 }
 
-// ── 约定：状态集与转换表 ─────────────────────────────
+// ── 约定：状态集 ────────────────────────────────────
 
-/** 角色 → 状态名：默认状态集 + 库内覆盖 */
-export function statesOf(db: DatabaseSync): Record<StateRole, string> {
-	const override = getMeta<Partial<Record<StateRole, string>>>(db, "states") ?? {};
-	return { ...DEFAULT_STATES, ...override };
+/** 状态集：库内声明优先，没配就用默认集 */
+export function statesOf(db: DatabaseSync): StateDef[] {
+	const raw = getMeta<unknown>(db, "states");
+	if (raw === undefined) return DEFAULT_STATE_DEFS.map((state) => ({ ...state }));
+	return normalizeStates(raw);
 }
 
-/** 状态名 → 角色；认不出来的状态名报错，避免约定漂移后静默通过 */
-export function roleOf(db: DatabaseSync, state: string): StateRole {
-	const states = statesOf(db);
-	for (const role of ROLES) {
-		if (states[role] === state) return role;
+const STATE_FLAGS = ["waiting", "timing", "singleOwner", "execution", "needsBasis", "initial"] as const;
+
+function normalizeStates(raw: unknown): StateDef[] {
+	if (!Array.isArray(raw) || raw.length === 0) {
+		throw new LedgerError(
+			`meta.states 要写成非空数组，例如 [{"name":"待认领","waiting":true},{"name":"已收口","terminal":"done","needsBasis":true}]；现在是：${JSON.stringify(raw)}`,
+		);
 	}
-	throw new LedgerError(`未知状态：${state}（当前状态集：${Object.values(states).join(" / ")}）`);
+	const states: StateDef[] = [];
+	const seen = new Set<string>();
+	for (const item of raw) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) {
+			throw new LedgerError(`meta.states 的每一项都要写成对象，现在是：${JSON.stringify(item)}`);
+		}
+		const record = item as Record<string, unknown>;
+		const name = typeof record.name === "string" ? record.name.trim() : "";
+		if (!name) throw new LedgerError(`meta.states 里有一项没写 name：${JSON.stringify(item)}`);
+		if (seen.has(name)) throw new LedgerError(`meta.states 里状态名重复：${name}`);
+		seen.add(name);
+		const state: StateDef = { name };
+		for (const flag of STATE_FLAGS) {
+			const value = record[flag];
+			if (value === undefined) continue;
+			if (typeof value !== "boolean") {
+				throw new LedgerError(`状态「${name}」的 ${flag} 要写 true 或 false，现在是：${JSON.stringify(value)}`);
+			}
+			state[flag] = value;
+		}
+		const terminal = record.terminal;
+		if (terminal !== undefined) {
+			if (terminal !== "done" && terminal !== "cancelled") {
+				throw new LedgerError(
+					`状态「${name}」的 terminal 只能写 "done" 或 "cancelled"，现在是：${JSON.stringify(terminal)}`,
+				);
+			}
+			state.terminal = terminal;
+		}
+		states.push(state);
+	}
+	for (const kind of ["done", "cancelled"] as const) {
+		if (states.filter((state) => state.terminal === kind).length > 1) {
+			throw new LedgerError(`meta.states 里 terminal=${kind} 只能有一个状态`);
+		}
+	}
+	if (!states.some((state) => !state.terminal)) {
+		throw new LedgerError("meta.states 至少要有一个非终态：建单要落在能继续推进的状态上");
+	}
+	return states;
 }
 
-export function stateOf(db: DatabaseSync, role: StateRole): string {
-	return statesOf(db)[role];
+/** 库里的状态名清单，按声明顺序 */
+export function stateNames(db: DatabaseSync): string[] {
+	return statesOf(db).map((state) => state.name);
+}
+
+/** 按名字取状态声明；未声明的名字直接报错，不让拼错静默变成第 N 个状态 */
+export function stateDef(db: DatabaseSync, name: string): StateDef {
+	const found = statesOf(db).find((state) => state.name === name);
+	if (!found) {
+		throw new LedgerError(`未知状态：${name}（当前状态集：${stateNames(db).join(" / ")}）`);
+	}
+	return found;
+}
+
+/** 终态状态名；项目没声明对应终态时返回 undefined */
+export function stateByTerminal(db: DatabaseSync, kind: TerminalKind): string | undefined {
+	return statesOf(db).find((state) => state.terminal === kind)?.name;
+}
+
+/** 所有终态的名字 */
+export function terminalStateNames(db: DatabaseSync): string[] {
+	return statesOf(db)
+		.filter((state) => state.terminal)
+		.map((state) => state.name);
+}
+
+/** 建单不指定状态时的落点：标了 initial 的优先，否则第一个非终态 */
+export function initialStateDef(db: DatabaseSync): StateDef {
+	const states = statesOf(db);
+	return states.find((state) => state.initial) ?? states.find((state) => !state.terminal) ?? states[0];
+}
+
+export function isTerminal(db: DatabaseSync, state: string): boolean {
+	return stateDef(db, state).terminal != null;
+}
+
+/** 状态是不是「在等人接手或裁定」 */
+export function isWaitingState(db: DatabaseSync, state: string): boolean {
+	return stateDef(db, state).waiting === true;
 }
 
 /**
@@ -276,23 +356,8 @@ export function assertType(db: DatabaseSync, type: string): string {
 	return type;
 }
 
-/** 转换表：默认 + 库内覆盖 */
-export function transitionsOf(db: DatabaseSync): Record<StateRole, readonly StateRole[]> {
-	const override = getMeta<Partial<Record<StateRole, StateRole[]>>>(db, "transitions") ?? {};
-	return { ...DEFAULT_TRANSITIONS, ...override };
-}
-
-export function isTerminal(db: DatabaseSync, state: string): boolean {
-	const role = roleOf(db, state);
-	return role === "done" || role === "cancelled";
-}
 export function idPrefixOf(db: DatabaseSync): string {
 	return getMeta<string>(db, "idPrefix") ?? "T";
-}
-
-/** 状态的角色是不是「在等人接手或裁定」 */
-export function isWaitingState(db: DatabaseSync, state: string): boolean {
-	return (WAITING_ROLES as readonly StateRole[]).includes(roleOf(db, state));
 }
 
 // ── 事件：只追加，不改 ───────────────────────────────

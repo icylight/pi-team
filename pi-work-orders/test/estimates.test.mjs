@@ -135,7 +135,7 @@ test("估算进度自开工算起，未开工的单不算落后", () => {
 
 	const active = createOrder(
 		db,
-		{ title: "在做", nextActors: ["dev"], role: "active", estimate: { wallMin: 100 } },
+		{ title: "在做", nextActors: ["dev"], state: "在做", estimate: { wallMin: 100 } },
 		owner,
 	);
 	// agingEvent 的语义是「把事件改到距今 N 分钟」，不是累加
@@ -156,7 +156,7 @@ test("估算进度自开工算起，未开工的单不算落后", () => {
 
 test("没估墙钟就没有进度，不拿主动工时冒充", () => {
 	const { db } = freshLedger();
-	const o = createOrder(db, { title: "甲", nextActors: ["dev"], role: "active", estimate: { activeMin: 60 } }, owner);
+	const o = createOrder(db, { title: "甲", nextActors: ["dev"], state: "在做", estimate: { activeMin: 60 } }, owner);
 	agingEvent(db, o.id, 600);
 	assert.deepEqual(estimateStatus(db, getOrder(db, o.id)), { level: "none", ratio: null, remainMin: null });
 	db.close();
@@ -164,7 +164,7 @@ test("没估墙钟就没有进度，不拿主动工时冒充", () => {
 
 test("已过去分钟数按开工时刻算，正文改动不重置", () => {
 	const { db } = freshLedger();
-	const o = createOrder(db, { title: "甲", nextActors: ["dev"], role: "active", estimate: { wallMin: 60 } }, owner);
+	const o = createOrder(db, { title: "甲", nextActors: ["dev"], state: "在做", estimate: { wallMin: 60 } }, owner);
 	agingEvent(db, o.id, 40);
 	assert.ok(Math.abs(elapsedMinutes(db, getOrder(db, o.id)) - 40) <= 1);
 	updateOrder(db, o.id, { appendBody: "补一句" }, owner);
@@ -176,7 +176,7 @@ test("已过去分钟数按开工时刻算，正文改动不重置", () => {
 
 test("等依赖的分钟数只对等依赖的单算", () => {
 	const { db } = freshLedger();
-	const up = createOrder(db, { title: "上游", nextActors: ["qa"], role: "active" }, owner);
+	const up = createOrder(db, { title: "上游", nextActors: ["qa"], state: "在做" }, owner);
 	const down = createOrder(db, { title: "下游", nextActors: ["dev"], dependsOn: [up.id] }, owner);
 	agingEvent(db, down.id, 90);
 	assert.ok(Math.abs(dependencyWaitMinutes(db, getOrder(db, down.id)) - 90) <= 1);
@@ -186,7 +186,7 @@ test("等依赖的分钟数只对等依赖的单算", () => {
 
 test("上游收口后，它的终止依据成为下游的已知产物", () => {
 	const { db } = freshLedger();
-	const up = createOrder(db, { title: "上游", nextActors: ["dev"], role: "active" }, owner);
+	const up = createOrder(db, { title: "上游", nextActors: ["dev"], state: "在做" }, owner);
 	const down = createOrder(db, { title: "下游", nextActors: ["qa"], dependsOn: [up.id] }, owner);
 	assert.deepEqual(upstreamArtifacts(db, down.id), [], "上游没收口时没有产物");
 
@@ -204,7 +204,7 @@ test("上游收口后，它的终止依据成为下游的已知产物", () => {
 
 test("派工简报带依赖、产物、占位许可与重读信号", () => {
 	const { db } = freshLedger();
-	const up = createOrder(db, { title: "上游", nextActors: ["dev"], role: "active" }, owner);
+	const up = createOrder(db, { title: "上游", nextActors: ["dev"], state: "在做" }, owner);
 	const down = createOrder(
 		db,
 		{
@@ -239,10 +239,10 @@ test("派工简报带依赖、产物、占位许可与重读信号", () => {
 
 test("上游收口与估算超期都算必须重读的信号", () => {
 	const { db } = freshLedger();
-	const up = createOrder(db, { title: "上游", nextActors: ["dev"], role: "active" }, owner);
+	const up = createOrder(db, { title: "上游", nextActors: ["dev"], state: "在做" }, owner);
 	const down = createOrder(
 		db,
-		{ title: "下游", nextActors: ["qa"], role: "active", dependsOn: [up.id], estimate: { wallMin: 60 } },
+		{ title: "下游", nextActors: ["qa"], state: "在做", dependsOn: [up.id], estimate: { wallMin: 60 } },
 		owner,
 	);
 	updateOrder(db, up.id, { state: "待复核" }, { actor: "dev", reason: "做完" });
@@ -278,12 +278,12 @@ test("估算超期与等依赖超阈都进提醒，不只催停滞", () => {
 	const { db } = freshLedger();
 	const active = createOrder(
 		db,
-		{ title: "做到一半", nextActors: ["dev"], role: "active", estimate: { wallMin: 60 } },
+		{ title: "做到一半", nextActors: ["dev"], state: "在做", estimate: { wallMin: 60 } },
 		owner,
 	);
 	agingEvent(db, active.id, 70); // 超过 100%
 
-	const up = createOrder(db, { title: "前置", nextActors: ["qa"], role: "active" }, owner);
+	const up = createOrder(db, { title: "前置", nextActors: ["qa"], state: "在做" }, owner);
 	const waiting = createOrder(db, { title: "等前置", nextActors: ["dev"], dependsOn: [up.id] }, owner);
 	agingEvent(db, waiting.id, 90); // 等依赖 90m > 60m
 
@@ -302,7 +302,7 @@ test("估算超期与等依赖超阈都进提醒，不只催停滞", () => {
 test("同一条单命中多条理由时只留最紧迫的那条", () => {
 	const { db } = freshLedger();
 	// 待复核且停滞，同时又超估算：留估算超期（最紧）
-	const o = createOrder(db, { title: "甲", nextActors: ["qa"], role: "active", estimate: { wallMin: 60 } }, owner);
+	const o = createOrder(db, { title: "甲", nextActors: ["qa"], state: "在做", estimate: { wallMin: 60 } }, owner);
 	agingEvent(db, o.id, 90);
 	const due = collectDue(db, watchCfg).filter((d) => d.waiting.order.id === o.id);
 	assert.equal(due.length, 1, "一条单只出现一次");
@@ -312,7 +312,7 @@ test("同一条单命中多条理由时只留最紧迫的那条", () => {
 
 test("估算从 80% 走到 100% 是两条信息，不被 repeat 压掉", () => {
 	const { db } = freshLedger();
-	const o = createOrder(db, { title: "甲", nextActors: ["dev"], role: "active", estimate: { wallMin: 100 } }, owner);
+	const o = createOrder(db, { title: "甲", nextActors: ["dev"], state: "在做", estimate: { wallMin: 100 } }, owner);
 	agingEvent(db, o.id, 85);
 	const first = buildWatchText(db, { me: "owner", config: watchCfg });
 	assert.match(first.text, /估算将到/);
@@ -329,7 +329,7 @@ test("估算从 80% 走到 100% 是两条信息，不被 repeat 压掉", () => {
 
 test("waitMinutes 可配：调大之后等依赖不再提", () => {
 	const { db } = freshLedger();
-	const up = createOrder(db, { title: "前置", nextActors: ["qa"], role: "active" }, owner);
+	const up = createOrder(db, { title: "前置", nextActors: ["qa"], state: "在做" }, owner);
 	const down = createOrder(db, { title: "等前置", nextActors: ["dev"], dependsOn: [up.id] }, owner);
 	agingEvent(db, down.id, 90);
 

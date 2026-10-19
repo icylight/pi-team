@@ -36,7 +36,15 @@ import {
 	openNotifications,
 	reconcileNotifications,
 } from "./core/notifications.ts";
-import { defaultDbPath, eventsOf, initLedger, openLedger, statesOf, typesOf } from "./core/schema.ts";
+import {
+	defaultDbPath,
+	eventsOf,
+	initLedger,
+	openLedger,
+	stateNames,
+	terminalStateNames,
+	typesOf,
+} from "./core/schema.ts";
 import {
 	addDep,
 	countBlockedDownstream,
@@ -52,7 +60,7 @@ import {
 	updateOrder,
 	waitingOrders,
 } from "./core/store.ts";
-import { type Order, STALE_MINUTES, type StateRole } from "./core/types.ts";
+import { type Order, STALE_MINUTES } from "./core/types.ts";
 import {
 	buildWatchText,
 	followsRole,
@@ -581,7 +589,7 @@ export default function (pi: ExtensionAPI) {
 					types: params.types,
 				});
 				try {
-					return `工单库已建：${dbPath}\n状态集：${Object.values(statesOf(db)).join(" · ")}\n类型：${typesOf(db).join(" · ")}`;
+					return `工单库已建：${dbPath}\n状态集：${stateNames(db).join(" · ")}\n类型：${typesOf(db).join(" · ")}`;
 				} finally {
 					db.close();
 				}
@@ -684,9 +692,9 @@ export default function (pi: ExtensionAPI) {
 			body: Type.Optional(Type.String({ description: "正文，markdown" })),
 			contents: Type.Optional(Type.Array(ContentEntrySchema, { description: "具名 md 内容入口；省略默认为空列表" })),
 			id: Type.Optional(Type.String({ description: "指定工单号；不给就自动编号" })),
-			role: Type.Optional(
+			state: Type.Optional(
 				Type.String({
-					description: "初始状态角色：claimable（默认）/ active（接了就直接在做）",
+					description: "初始状态名；省略就落项目声明的初始状态（默认「待认领」）",
 				}),
 			),
 			type: Type.Optional(
@@ -719,7 +727,7 @@ export default function (pi: ExtensionAPI) {
 							body: params.body,
 							contents: params.contents,
 							nextActors: params.nextActors,
-							role: params.role as StateRole | undefined,
+							state: params.state,
 							type: params.type,
 							dependsOn: params.dependsOn,
 							estimate: {
@@ -744,7 +752,7 @@ export default function (pi: ExtensionAPI) {
 		name: "orders_update",
 		label: "改工单",
 		description:
-			"改工单状态或字段。转换按角色校验（未声明的转换会拒绝）；结单必须有终止依据（证据指针），取消必须给理由或取代它的单号。正文以当前有效口径为准：范围修订直接用 body 覆盖旧口径（理由写进 reason），appendBody 只用于补一小段，别靠追加堆大部头。收口时回填实际工时与实际偏差。",
+			"改工单状态或字段。状态之间不校验转换，任何状态都能改（改到需要依据的状态时必须给依据）；正文以当前有效口径为准：范围修订直接用 body 覆盖旧口径（理由写进 reason），appendBody 只用于补一小段，别靠追加堆大部头。收口时回填实际工时与实际偏差。",
 		parameters: Type.Object({
 			id: Type.String({ description: "工单号" }),
 			reason: Type.String({ description: "为什么这么改（必填）" }),
@@ -1003,10 +1011,8 @@ export default function (pi: ExtensionAPI) {
 	function renderDoctor(db: ReturnType<typeof openLedger>): string {
 		const lines: string[] = [];
 		const all = listOrders(db, { history: true });
-		const states = statesOf(db);
-		lines.push(
-			`工单 ${all.length} 条｜未收口 ${all.filter((o) => o.state !== states.done && o.state !== states.cancelled).length} 条`,
-		);
+		const terminal = new Set(terminalStateNames(db));
+		lines.push(`工单 ${all.length} 条｜未收口 ${all.filter((o) => !terminal.has(o.state)).length} 条`);
 
 		const ephemeral = all.filter((o) =>
 			o.nextActors.some((n) => /^\d+-[0-9a-f]{4}$/.test(n) || /[A-Za-z0-9_.-]+-\d{2,}$/.test(n)),
@@ -1016,9 +1022,7 @@ export default function (pi: ExtensionAPI) {
 			for (const o of ephemeral) lines.push(`  ${o.id} ${o.state} → ${o.nextActors.join(", ")}`);
 		}
 
-		const noActor = all.filter(
-			(o) => o.nextActors.length === 0 && o.state !== states.done && o.state !== states.cancelled,
-		);
+		const noActor = all.filter((o) => o.nextActors.length === 0 && !terminal.has(o.state));
 		if (noActor.length) lines.push(`未收口但没写下一步找谁：${noActor.map((o) => o.id).join("、")}`);
 
 		const staleDeps = all.filter((o) => getOrder(db, o.id).staleDeps.length);

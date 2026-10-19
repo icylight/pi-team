@@ -11,15 +11,14 @@ import type { DatabaseSync } from "node:sqlite";
 import { readDispatch, type DispatchSnapshot } from "../../core/dispatch.ts";
 import { eventsOf, openLedger, statesOf } from "../../core/schema.ts";
 import { getOrder, listOrders, requirementOf, staleWaiting, waitingOrders } from "../../core/store.ts";
-import {
-	TERMINAL_ROLES,
-	type ListedOrder,
-	type Order,
-	type OrderEvent,
-	type OrderView,
-	type Requirement,
-	type StateRole,
-	type Waiting,
+import type {
+	ListedOrder,
+	Order,
+	OrderEvent,
+	OrderView,
+	Requirement,
+	StateDef,
+	Waiting,
 } from "../../core/types.ts";
 import { STALE_MINUTES } from "../../core/types.ts";
 import { discoverLedgers, type LedgerRef } from "./scan.ts";
@@ -32,7 +31,7 @@ export interface LedgerSnapshot {
 	dbPath: string;
 	ok: boolean;
 	error?: string;
-	states?: Record<StateRole, string>;
+	states?: StateDef[];
 	requirement?: Requirement;
 	orders?: ListedOrder[];
 	waiting?: Waiting[];
@@ -43,7 +42,7 @@ export interface LedgerSnapshot {
 export interface OrderPageData {
 	slug: string;
 	project: string;
-	states: Record<StateRole, string>;
+	states: StateDef[];
 	view: OrderView;
 	events: OrderEvent[];
 }
@@ -125,13 +124,9 @@ function readError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** 未收口的单：状态不在终态角色（done/cancelled）里的 */
+/** 未收口的单：状态不是终态的 */
 export function openOrders(l: LedgerSnapshot): ListedOrder[] {
-	const terminal = new Set<string>();
-	for (const role of TERMINAL_ROLES) {
-		const name = l.states?.[role];
-		if (name) terminal.add(name);
-	}
+	const terminal = new Set((l.states ?? []).filter((state) => state.terminal).map((state) => state.name));
 	return (l.orders ?? []).filter((o) => !terminal.has(o.state));
 }
 

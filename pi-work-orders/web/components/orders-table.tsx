@@ -3,7 +3,7 @@ import { ActorName } from "@/components/human-actor";
 import { TypeLabel } from "@/components/order-type";
 import { StateBadge } from "@/components/state-badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { ListedOrder, StateRole, Waiting } from "../../core/types";
+import type { ListedOrder, StateDef, Waiting } from "../../core/types";
 import { formatAgo, minutesSince } from "@/lib/time";
 
 /** 「等了」只对等某人动的单显示；依赖等待还没到该催的时候 */
@@ -21,7 +21,7 @@ export function OrdersTable({
 }: {
 	slug: string;
 	orders: readonly ListedOrder[];
-	states: Record<StateRole, string>;
+	states: readonly StateDef[];
 	waiting: readonly Waiting[];
 	now: number;
 }) {
@@ -83,7 +83,7 @@ export function OrdersTable({
 									<span className="inline-flex flex-wrap gap-x-1.5">
 										{o.dependsOn.map((id) => {
 											const up = orderById.get(id);
-											const done = up?.state === states.done;
+											const done = up?.state === states.find((def) => def.terminal === "done")?.name;
 											return (
 												<Link
 													key={id}

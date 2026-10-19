@@ -4,12 +4,12 @@ import Link from "next/link";
 import { ActorName, HUMAN_ACCENT, waitsForHuman } from "@/components/human-actor";
 import { TypeLabel } from "@/components/order-type";
 import { waitedLabel } from "@/components/orders-table";
-import { roleOfState } from "@/components/state-badge";
-import { ROLES, TERMINAL_ROLES, type ListedOrder, type StateRole, type Waiting } from "../../core/types";
+import { stateDefOf } from "@/components/state-badge";
+import type { ListedOrder, StateDef, Waiting } from "../../core/types";
 
 /**
- * 状态分列看板：非终态角色各一列（空列不渲染），卡片进详情页。
- * 列顺序按 ROLES 的工作流顺序，不是按单量。
+ * 状态分列看板：非终态状态各一列（空列不渲染），卡片进详情页。
+ * 列顺序按项目声明的状态顺序，不是按单量。
  */
 export function Board({
 	slug,
@@ -21,20 +21,20 @@ export function Board({
 }: {
 	slug: string;
 	orders: readonly ListedOrder[];
-	states: Record<StateRole, string>;
+	states: StateDef[];
 	waiting: readonly Waiting[];
 	now: number;
 	dispatch?: DispatchSnapshot;
 }) {
-	const byRole = new Map<StateRole, ListedOrder[]>();
+	const byState = new Map<string, ListedOrder[]>();
 	for (const o of orders) {
-		const role = roleOfState(states, o.state);
-		if (!role || TERMINAL_ROLES.includes(role)) continue;
-		const list = byRole.get(role) ?? [];
+		const def = stateDefOf(states, o.state);
+		if (!def || def.terminal) continue;
+		const list = byState.get(def.name) ?? [];
 		list.push(o);
-		byRole.set(role, list);
+		byState.set(def.name, list);
 	}
-	const columns = ROLES.filter((r) => !TERMINAL_ROLES.includes(r) && (byRole.get(r)?.length ?? 0) > 0);
+	const columns = states.filter((def) => !def.terminal && (byState.get(def.name)?.length ?? 0) > 0);
 	if (columns.length === 0) return <p className="text-sm text-muted-foreground">没有在办的单</p>;
 
 	const orderById = new Map(orders.map((o) => [o.id, o]));
@@ -43,14 +43,14 @@ export function Board({
 
 	return (
 		<div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-3 items-start">
-			{columns.map((role) => (
-				<section key={role} className="rounded-lg border bg-muted/30 p-2">
+			{columns.map((def) => (
+				<section key={def.name} className="rounded-lg border bg-muted/30 p-2">
 					<header className="flex items-baseline justify-between px-1 pb-2 text-sm font-medium">
-						{states[role]}
-						<span className="font-mono text-xs text-muted-foreground">{byRole.get(role)!.length}</span>
+						{def.name}
+						<span className="font-mono text-xs text-muted-foreground">{byState.get(def.name)!.length}</span>
 					</header>
 					<div className="flex flex-col gap-2">
-						{byRole.get(role)!.map((o) => (
+						{byState.get(def.name)!.map((o) => (
 							<Card
 								key={o.id}
 								slug={slug}
@@ -71,9 +71,10 @@ export function Board({
 function unresolvedDeps(
 	o: ListedOrder,
 	orderById: Map<string, ListedOrder>,
-	states: Record<StateRole, string>,
+	states: readonly StateDef[],
 ): string[] {
-	const done = states.done;
+	const done = states.find((def) => def.terminal === "done")?.name;
+	if (!done) return [...o.dependsOn];
 	return o.dependsOn.filter((id) => orderById.get(id)?.state !== done);
 }
 
