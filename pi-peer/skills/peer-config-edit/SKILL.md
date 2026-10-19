@@ -63,6 +63,7 @@ description: 编辑 pi-peer 的项目配置——`.pi/peer.json`（启用开关�
 - `group.flow`：流程文档路径
 - `wakeOnHandoff`：收到工单交接时是否额外注入一条唤醒消息把目标叫醒；**缺省关闭**，只把交接正文落进会话、不替目标开新一轮。写错时按关闭处理并告警
 - `workOrders.followRole`：工单定时提醒跟的角色名（**由 pi-work-orders 读，不由 pi-peer 读**；空 = 不开）。同段还收 `intervalMinutes` / `staleMinutes` / `repeatMinutes`（正数）与 `digest`（布尔，每轮往系统提示注入台账摘要，缺省关闭）
+- `workOrders.prompt`：提醒末尾那段提示词，字符串，可写多行（换行保留）。**不写就用内置两行**；写了整段替换那两行，读数与分组部分不变。占位符 `{count}`（本轮条数）/ `{interval}`（取 `intervalMinutes`）/ `{me}`（当前角色名），不认识的占位符原样保留
 
 顶层 `roles` / `flow` 是不包在 `group` 里的简写，`group.*` 优先。路径一律相对**声明它的配置文件**解析。
 

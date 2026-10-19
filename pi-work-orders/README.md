@@ -201,7 +201,8 @@ cd pi-work-orders/web && npm install && npm run build
     "intervalMinutes": 15,
     "staleMinutes": 30,
     "repeatMinutes": 60,
-    "waitMinutes": 120
+    "waitMinutes": 120,
+    "prompt": "{me} 这轮 {count} 条，每 {interval}m 一次：先看等依赖的，再改派。"
   }
 }
 ```
@@ -210,6 +211,7 @@ cd pi-work-orders/web && npm install && npm run build
 - `digest` —— 每轮把台账摘要注入系统提示，默认 `false`
 - `followRole` —— 定时提醒跟随的角色名，匹配角色实例名（`owner` 同时匹配 `owner-2`）；不写就不跑
 - `intervalMinutes` 隔多久看一次（15）｜ `staleMinutes` 等超多久算停滞（30）｜ `repeatMinutes` 同一条单最短隔多久再提（60）｜ `waitMinutes` 等依赖超多久要报（120）
+- `prompt` —— 提醒末尾的提示词，**不写就用内置那两行**（「这一步只报读数…」「下一步：orders_show…」）；写了就整段替换这两行，读数与分组那部分不受影响。换行保留，可写多行。认三个占位符：`{count}` 本轮条数、`{interval}` 值取 `intervalMinutes`、`{me}` 当前角色名。不认识的占位符原样留着，不报错——拼错了会直接看见
 - 身份先问 pi-peer（`peer:whoami`），没装 peer 时退回会话名（`/peer-name`）
 - 配置在会话启动时读一次；改了重开会话生效。配错了当场提示，不静默退回默认值
 - 库是这个会话里才建的也认：建完下一轮就开始提

@@ -40,6 +40,8 @@ export interface WatchConfig {
 	waitMinutes: number;
 	/** 每轮对话把台账摘要注入系统提示：默认关，显式写 true 才注入 */
 	digest: boolean;
+	/** 提醒末尾的提示词：空串 = 用内置那两行；占位符见 README 的配置表 */
+	prompt: string;
 }
 
 export const WATCH_DEFAULTS: WatchConfig = {
@@ -49,6 +51,7 @@ export const WATCH_DEFAULTS: WatchConfig = {
 	repeatMinutes: 60,
 	waitMinutes: WAIT_MINUTES,
 	digest: false,
+	prompt: "",
 };
 
 /**
@@ -130,6 +133,13 @@ function applyConfig(target: WatchConfig, source: Record<string, unknown>, file:
 	if (source.digest !== undefined) {
 		if (typeof source.digest === "boolean") target.digest = source.digest;
 		else problems.push(`${file}：workOrders.digest 要写 true 或 false，这一项被忽略`);
+	}
+	if (source.prompt !== undefined) {
+		const value = source.prompt;
+		// 空串与没配等价，但「显式写了个空的」按写错报出来：静默当没配，配的人会以为生效了
+		if (typeof value !== "string") problems.push(`${file}：workOrders.prompt 要写字符串，这一项被忽略`);
+		else if (!value.trim()) problems.push(`${file}：workOrders.prompt 是空串，这一项被忽略（不配就用内置文案）`);
+		else target.prompt = value;
 	}
 }
 
@@ -268,11 +278,30 @@ function renderNote(due: WatchDue[], me: string, config: WatchConfig, now: numbe
 		}
 		if (items.length > MAX_LINES) lines.push(`  ……另有 ${items.length - MAX_LINES} 条，用 orders_list 看全`);
 	}
-	lines.push(
-		"这一步只报读数，不是催进度：估算到了就复核估算，等依赖太久就查前置进度或改派（orders_update 的 nextActors）。",
-		"下一步：orders_show(id=…) 读正文；收口要带终止依据。",
-	);
+	for (const line of footerLines(due.length, me, config)) lines.push(line);
 	return lines.join("\n");
+}
+
+/**
+ * 不配置时提醒末尾的两行。**这是默认路径的一部分**：改它等于改所有项目的提醒，
+ * 只想让某个项目换个说法就配 `workOrders.prompt`，别动这里。
+ */
+const DEFAULT_PROMPT_LINES = [
+	"这一步只报读数，不是催进度：估算到了就复核估算，等依赖太久就查前置进度或改派（orders_update 的 nextActors）。",
+	"下一步：orders_show(id=…) 读正文；收口要带终止依据。",
+];
+
+/**
+ * 末尾提示词：配了就用配的那段（占位符按本轮读数替换），没配就用默认两行。
+ * 模板按原换行拆开——提醒是一段多行文本，不是一行。
+ */
+function footerLines(count: number, me: string, config: WatchConfig): string[] {
+	if (!config.prompt.trim()) return [...DEFAULT_PROMPT_LINES];
+	const filled = config.prompt
+		.replaceAll("{count}", String(count))
+		.replaceAll("{interval}", String(config.intervalMinutes))
+		.replaceAll("{me}", me);
+	return filled.split("\n");
 }
 
 const REASON_LABEL: Record<WatchReason, string> = {

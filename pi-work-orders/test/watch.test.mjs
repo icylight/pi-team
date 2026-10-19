@@ -232,3 +232,66 @@ test("一个角色名下最多列 5 条，其余折成一句", () => {
 	assert.equal(note.text.split("\n").filter((line) => line.startsWith("  T")).length, 5);
 	db.close();
 });
+
+// ── 末尾提示词（workOrders.prompt）────────────────────
+
+test("不配 prompt：整段提醒与改动前逐字相同", () => {
+	const { db } = freshLedger();
+	const mine = createOrder(db, { title: "改登录页", nextActors: ["owner"] }, { actor: "owner", reason: "测试" });
+	const other = createOrder(db, { title: "补单测", nextActors: ["qa"] }, { actor: "owner", reason: "测试" });
+	const human = createOrder(db, { title: "定验收口径", nextActors: ["用户"] }, { actor: "owner", reason: "测试" });
+	agingEvent(db, mine.id, 90);
+	agingEvent(db, other.id, 50);
+	agingEvent(db, human.id, 40);
+
+	const note = buildWatchText(db, { me: "owner", config: base });
+	// 整段比对而不是「尾部两行对得上」：默认路径的承诺是逐字不变，
+	// 只比尾部会让读数区被改动也照样绿。
+	assert.equal(
+		note.text,
+		[
+			"【工单台账 · 定时提醒】这轮 3 条（每 15m 自查）：停滞 3 条",
+			"等你动的 1 条：",
+			"  T01 待认领 等了 1.5h｜改登录页｜停滞超 30m",
+			"等 qa 的 1 条：",
+			"  T02 待认领 等了 50m｜补单测｜停滞超 30m",
+			"等 用户 的 1 条（人不在会话里，叫不动）：",
+			"  T03 待认领 等了 40m｜定验收口径｜停滞超 30m",
+			"这一步只报读数，不是催进度：估算到了就复核估算，等依赖太久就查前置进度或改派（orders_update 的 nextActors）。",
+			"下一步：orders_show(id=…) 读正文；收口要带终止依据。",
+		].join("\n"),
+	);
+	db.close();
+});
+
+test("配了 prompt：替换末尾提示词，占位符按本轮读数填，读数区不动", () => {
+	const { db } = freshLedger();
+	const mine = createOrder(db, { title: "改登录页", nextActors: ["owner"] }, { actor: "owner", reason: "测试" });
+	const other = createOrder(db, { title: "补单测", nextActors: ["qa"] }, { actor: "owner", reason: "测试" });
+	agingEvent(db, mine.id, 90);
+	agingEvent(db, other.id, 50);
+
+	const configured = { ...base, intervalMinutes: 7, prompt: "{me} 这轮 {count} 条，每 {interval}m 一次\n第二行照原样保留" };
+	const note = buildWatchText(db, { me: "owner", config: configured });
+	const lines = note.text.split("\n");
+	assert.match(lines[0], /这轮 2 条（每 7m 自查）：停滞 2 条/, "读数区沿用配置值，模板不参与");
+	assert.deepEqual(lines.slice(-2), ["owner 这轮 2 条，每 7m 一次", "第二行照原样保留"]);
+	assert.ok(!note.text.includes("这一步只报读数"), "配了模板就不该再出内置文案");
+	db.close();
+});
+
+test("prompt 写错：报出来并走内置文案，不抛错、不静默", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "watch-cfg-"));
+	const file = path.join(dir, "peer.json");
+
+	writeConfig(file, { workOrders: { prompt: 42 } });
+	const typed = loadWatchConfig(file);
+	assert.equal(typed.config.prompt, "");
+	assert.equal(typed.problems.length, 1);
+	assert.match(typed.problems[0], /workOrders\.prompt/);
+
+	writeConfig(file, { workOrders: { prompt: "   " } });
+	const blank = loadWatchConfig(file);
+	assert.equal(blank.config.prompt, "", "空白串当没配");
+	assert.match(blank.problems[0], /workOrders\.prompt/);
+});
