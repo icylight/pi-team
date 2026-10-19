@@ -85,15 +85,25 @@ export interface Member {
 	 * 注册时从项目配置算好写进来，发现方不必读对方的配置文件。
 	 */
 	visibleTo?: string[];
+	/** 已受理、等这一轮结束才切换的角色分配；在跑一轮时写这里，agent_end 里执行后摘掉 */
+	pendingRole?: { role: string; from: string };
 }
 
 /** 忙超过这个时长就当它卡住了：不再信任 busy，避免一次异常让该会话永远收不到消息 */
 export const BUSY_STALE_MS = 30 * 60_000;
 
 // AI(TAG): [角色调度] 控制消息由接收进程校验并执行，不把消息正文当授权。
+// 目标在跑一轮时不打断：受理后排队，agent_end 里立刻切换，并用同一个 requestId 回第二次结果。
 export type RoleControl =
 	| { kind: "assign-role"; role: string; expiresAt: number; expectedRole?: string; expectedName: string }
-	| { kind: "assign-role-result"; requestId: string; ok: boolean; detail: string };
+	| {
+			kind: "assign-role-result";
+			requestId: string;
+			ok: boolean;
+			detail: string;
+			/** queued=受理待切；applied=已切换；dropped=未执行也不排队。缺省按立即结果处理 */
+			state?: "queued" | "applied" | "dropped";
+	  };
 
 export interface PeerMessage {
 	id: string;

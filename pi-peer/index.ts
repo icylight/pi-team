@@ -134,9 +134,15 @@ export default function (pi: ExtensionAPI) {
 		string,
 		{
 			from: string;
-			finish: (ok: boolean, detail: string) => void;
+			finish: (ok: boolean, detail: string, state?: "queued" | "applied" | "dropped") => void;
 		}
 	>();
+	/** 已受理、等目标停下才执行的请求：受理时工具已返回，结果只能提示，不能让调用方干等一整轮 */
+	const queuedAssignments = new Map<string, { to: string; role: string }>();
+	/** 本会话受理的排队分配：同一时刻只留一条，新请求取代旧的 */
+	let queuedRole:
+		| { requestId: string; role: string; from: string; expectedRole?: string; expectedName: string }
+		| undefined;
 	const currentConfig = () =>
 		loadProjectConfig(path.join(ctxRef?.cwd ?? process.cwd(), CONFIG_DIR_NAME, CONFIG_FILE)).config;
 	const canAssign = (role?: string) => {
@@ -202,25 +208,68 @@ export default function (pi: ExtensionAPI) {
 		const control = msg.control;
 		if (control?.kind === "assign-role-result") {
 			const pending = assignments.get(control.requestId);
-			if (pending?.from === msg.from) pending.finish(control.ok === true, control.detail);
+			if (pending?.from === msg.from) {
+				pending.finish(control.ok === true, control.detail, control.state);
+				return;
+			}
+			// 排队中的分配在目标停下时才回第二次结果：工具早已返回，这里只提示，不唤醒模型
+			const queued = queuedAssignments.get(control.requestId);
+			if (queued?.to !== msg.from) return;
+			queuedAssignments.delete(control.requestId);
+			if (control.ok === true) ctxRef.ui.notify(`pi-peer: 排队中的角色分配已执行（${queued.role}）`, "info");
+			else ctxRef.ui.notify(`pi-peer: 排队中的角色分配未执行（${queued.role}）：${control.detail}`, "warning");
 			return;
 		}
 		if (control?.kind !== "assign-role") return;
 		const caller = store.listMembers().find((member) => member.key === msg.from);
 		// 同桶在线注册表是身份依据；同一 OS 用户可写文件，不作为进程隔离安全边界。
 		if (!caller || caller.key === self.key) return;
-		let detail: string;
-		let ok = false;
-		if (!canAssign(caller.role)) detail = "调用者当前角色没有 canAssignRoles 权限";
-		else if (!Number.isFinite(control.expiresAt) || control.expiresAt <= Date.now()) detail = "角色分配请求已过期";
-		else if (self.busy || !ctxRef.isIdle() || sessions.isPending() || peerCommandCount > 0)
-			detail = "目标会话在忙，未切换角色";
+		const reply = (ok: boolean, detail: string, state: "queued" | "applied" | "dropped") =>
+			sendControl(caller, { kind: "assign-role-result", requestId: msg.id, ok, detail, state });
+		if (!canAssign(caller.role)) reply(false, "调用者当前角色没有 canAssignRoles 权限", "dropped");
+		else if (!Number.isFinite(control.expiresAt) || control.expiresAt <= Date.now())
+			reply(false, "角色分配请求已过期", "dropped");
 		else if (self.role !== control.expectedRole || self.name !== control.expectedName)
-			detail = "目标角色已变化，请重新查询后分配";
-		else if (typeof control.role !== "string" || !isValidRoleName(control.role)) detail = "角色名非法";
+			reply(false, "目标角色已变化，请重新查询后分配", "dropped");
+		else if (typeof control.role !== "string" || !isValidRoleName(control.role))
+			reply(false, "角色名非法", "dropped");
 		else if (!resolveRoleCard(ctxRef.cwd, loaded.config, control.role, CONFIG_DIR_NAME).path)
-			detail = "目标角色卡不存在";
-		else {
+			reply(false, "目标角色卡不存在", "dropped");
+		else if (sessions.isPending() || peerCommandCount > 0)
+			// 会话切换与人工改角色正在改身份：这一笔排队会在新身份上生效，不接
+			reply(false, "目标正在切换会话或角色，未排队，请稍后重试", "dropped");
+		else if (self.busy || !ctxRef.isIdle()) {
+			// 正在跑一轮：受理并排队，这一轮结束后在 agent_end 里立刻切换
+			const previous = queuedRole;
+			queuedRole = {
+				requestId: msg.id,
+				role: control.role,
+				from: caller.key,
+				expectedRole: control.expectedRole,
+				expectedName: control.expectedName,
+			};
+			self.pendingRole = { role: control.role, from: caller.name };
+			try {
+				store.register(self);
+			} catch {
+				// 写不进注册表不影响到点切换
+			}
+			// 被取代的那条已经收到过受理，补一条作废结果，别让调用方等它
+			if (previous) {
+				const stale = store.listMembers().find((member) => member.key === previous.from);
+				if (stale)
+					sendControl(stale, {
+						kind: "assign-role-result",
+						requestId: previous.requestId,
+						ok: false,
+						detail: `排队中的分配已被新请求取代（改为 ${control.role}）`,
+						state: "dropped",
+					});
+			}
+			reply(true, `目标在跑一轮，已排队：这一轮结束后立即切换为 ${control.role}`, "queued");
+		} else {
+			let detail: string;
+			let ok = false;
 			try {
 				roleTransition = setRole(control.role, ctxRef, { applyRoleDefaults: false });
 				await roleTransition;
@@ -231,9 +280,81 @@ export default function (pi: ExtensionAPI) {
 			} finally {
 				roleTransition = undefined;
 			}
+			reply(ok, detail, ok ? "applied" : "dropped");
 		}
-		sendControl(caller, { kind: "assign-role-result", requestId: msg.id, ok, detail });
 	};
+
+	/**
+	 * 排队中的角色分配：在 agent_end 里调，这一轮已经收尾、没有工具调用在跑。
+	 * 受理时校验过的权限与角色卡在这里复核一次，撤销或卡片被删就不执行。
+	 */
+	async function applyQueuedRole(): Promise<void> {
+		const queued = queuedRole;
+		if (!queued) return;
+		queuedRole = undefined;
+		const activeStore = store;
+		const finish = (ok: boolean, detail: string) => {
+			if (!store || !self || store !== activeStore) return;
+			if (self.pendingRole) {
+				self.pendingRole = undefined;
+				try {
+					store.register(self);
+				} catch {
+					// 摘标记失败不影响已生效的角色
+				}
+			}
+			const caller = store.listMembers().find((member) => member.key === queued.from);
+			// 调用者已离线：没有收件人，结果只落回本会话的角色与提示
+			if (!caller) return;
+			sendControl(caller, {
+				kind: "assign-role-result",
+				requestId: queued.requestId,
+				ok,
+				detail,
+				state: ok ? "applied" : "dropped",
+			});
+		};
+		const callerRole = store?.listMembers().find((member) => member.key === queued.from)?.role;
+		if (!canAssign(callerRole)) {
+			finish(false, "调用者已失去 canAssignRoles 权限，排队中的分配未执行");
+			return;
+		}
+		if (!self || !ctxRef) return;
+		if (self.role !== queued.expectedRole || self.name !== queued.expectedName) {
+			finish(false, "目标角色已变化，排队中的分配作废");
+			return;
+		}
+		if (!resolveRoleCard(ctxRef.cwd, loaded.config, queued.role, CONFIG_DIR_NAME).path) {
+			finish(false, "目标角色卡已不存在，排队中的分配未执行");
+			return;
+		}
+		try {
+			roleTransition = setRole(queued.role, ctxRef, { applyRoleDefaults: false });
+			await roleTransition;
+			const ok = self?.role === queued.role;
+			finish(ok, ok ? `已切换角色：${self.role}，实例名：${self.name}，当前模型：${self.model}` : "切换角色失败");
+		} catch (error) {
+			finish(false, `切换角色失败：${(error as Error).message}`);
+		} finally {
+			roleTransition = undefined;
+		}
+	}
+
+	/** 排队分配没机会执行时回一条未执行：调用方拿到的是明确结果，不是等不到的第二次确认 */
+	function dropQueuedRole(detail: string): void {
+		const queued = queuedRole;
+		if (!queued || !store || !self) return;
+		queuedRole = undefined;
+		const caller = store.listMembers().find((member) => member.key === queued.from);
+		if (!caller) return;
+		sendControl(caller, {
+			kind: "assign-role-result",
+			requestId: queued.requestId,
+			ok: false,
+			detail,
+			state: "dropped",
+		});
+	}
 
 	/** 生效配置的报告：启动提示与 /peer-config 共用，保证「报的」就是「跑的」 */
 	function configReport(cwd: string, role?: string) {
@@ -300,6 +421,9 @@ export default function (pi: ExtensionAPI) {
 		ctxRef = ctx;
 		sessions.dispose();
 		for (const pending of assignments.values()) pending.finish(false, "会话已切换，分配结果未确认");
+		// 换会话后排队分配会落到新身份上，宁可丢
+		dropQueuedRole("目标会话已切换，排队中的分配未执行");
+		queuedAssignments.clear();
 		teardown();
 
 		const root = process.env.PI_PEER_ROOT?.trim() || path.join(os.homedir(), CONFIG_DIR_NAME, "peers");
@@ -482,15 +606,22 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// 同上
 		}
+		// 排队中的角色分配在这里生效：这一轮已收尾，没有工具调用在跑
+		void applyQueuedRole();
 	});
 
 	pi.on("session_shutdown", async () => {
 		sessions.dispose();
 		for (const pending of assignments.values()) pending.finish(false, "会话已关闭，分配结果未确认");
+		// 进程要结束了：给受理过的调用方一条未执行，别让它等到下次上线才发现
+		dropQueuedRole("目标会话已关闭，排队中的分配未执行");
+		queuedAssignments.clear();
 		teardown();
 	});
 
 	pi.on("before_agent_start", async (event) => {
+		// 中断路径上 agent_end 未必发，这里兜一次：新一轮开始时还挂着排队，就先切再出提示
+		if (queuedRole) await applyQueuedRole();
 		// 空闲校验后若人工恰好发起新一轮，先等角色变更完成，再构造该轮提示。
 		if (roleTransition) await roleTransition;
 		const sections = event.systemPromptOptions.sections;
@@ -644,8 +775,10 @@ export default function (pi: ExtensionAPI) {
 					: m.role
 						? `（角色：${m.role}）`
 						: "";
+				// 待切：已受理、等这一轮结束后才生效的角色分配，派工方看到就别把它当已切换
+				const pending = m.pendingRole ? `·待切 ${m.pendingRole.role}` : "";
 				return (
-					`- ${label}${tag}｜${m.model}｜${live ? (isBusy(m) ? "在线·在忙" : "在线·空闲") : "离线"}` +
+					`- ${label}${tag}｜${m.model}｜${live ? (isBusy(m) ? "在线·在忙" : "在线·空闲") : "离线"}${live ? pending : ""}` +
 					`｜id=${m.key}｜pid=${m.pid}｜${age}s 前心跳`
 				);
 			};
@@ -712,7 +845,7 @@ export default function (pi: ExtensionAPI) {
 		name: "peer_assign_role",
 		label: "Peer Assign Role",
 		description:
-			"给同项目其他空闲在线 pi 会话设定角色；调用者当前角色须配置 canAssignRoles: true。等待目标确认，不新建进程，也不清空目标上下文，不改目标的模型与思考强度。",
+			"给同项目其他在线 pi 会话设定角色；调用者当前角色须配置 canAssignRoles: true。目标空闲时立即切换，正在跑一轮时排队、这一轮结束后立即切换。返回受理结果，排队不代表已切换。不新建进程，也不清空目标上下文，不改目标的模型与思考强度。",
 		parameters: Type.Object({
 			to: Type.String({ description: "同项目目标会话的名称、id 或 pid，先用 peer_list 查看" }),
 			role: Type.String({ description: "要分配的角色名，须有有效角色卡" }),
@@ -731,7 +864,6 @@ export default function (pi: ExtensionAPI) {
 			if (target.bucket !== store.dir || target.member.key === self.key)
 				throw new Error("只能给同项目的其他会话分配角色");
 			if (target.member.roleAssignmentVersion !== 1) throw new Error("目标版本不支持角色分配，请先重载目标扩展");
-			if (isBusy(target.member)) throw new Error("目标会话在忙，未发送角色分配请求");
 			if (signal?.aborted) throw new Error("已取消，未发送请求");
 			return new Promise<ReturnType<typeof text>>((resolve, reject) => {
 				const requestId = sendControl(target.member, {
@@ -741,11 +873,23 @@ export default function (pi: ExtensionAPI) {
 					expectedRole: target.member.role,
 					expectedName: target.member.name,
 				});
-				const finish = (ok: boolean, detail: string) => {
+				const finish = (ok: boolean, detail: string, state?: "queued" | "applied" | "dropped") => {
 					clearTimeout(timer);
 					signal?.removeEventListener("abort", abort);
 					assignments.delete(requestId);
-					if (ok) resolve(text(detail));
+					if (ok && state === "queued") {
+						// 结果晚到：工具先返回受理，执行结果只在会话里提示
+						queuedAssignments.set(requestId, { to: target.member.key, role: params.role });
+						if (queuedAssignments.size > 50) queuedAssignments.delete(queuedAssignments.keys().next().value!);
+					}
+					if (ok)
+						resolve(
+							text(
+								state === "queued"
+									? `${detail}｜排队不等于已切换，peer_list 里标着「待切」；执行后会在本会话提示`
+									: detail,
+							),
+						);
 					else reject(new Error(detail));
 				};
 				const abort = () => finish(false, "等待已取消，目标可能已执行；请用 peer_list 核实，勿盲目重试");
@@ -892,16 +1036,17 @@ export default function (pi: ExtensionAPI) {
 			const me = ownAll.find((s) => s.member.key === selfKey);
 			const own = ownAll.filter((s) => s.member.key !== selfKey);
 			const foreignAll = store.listAllMembers().filter((s) => s.bucket !== store!.dir && s.member.key !== self!.key);
+			// 待切：已受理、等这一轮结束后才生效的角色分配
+			const tag = (member: Member, isSelf: boolean) => {
+				const parts = [
+					isSelf ? "我" : "",
+					member.role ? `角色：${member.role}` : "",
+					member.pendingRole ? `待切 ${member.pendingRole.role}` : "",
+				].filter(Boolean);
+				return parts.length ? `（${parts.join("，")}）` : "";
+			};
 			const row = (member: Member, label: string, isSelf = false) =>
-				`${label}${
-					isSelf
-						? member.role
-							? `（我，角色：${member.role}）`
-							: "（我）"
-						: member.role
-							? `（角色：${member.role}）`
-							: ""
-				} · ${member.model} · id=${member.key}`;
+				`${label}${tag(member, isSelf)} · ${member.model} · id=${member.key}`;
 			const lines = [
 				...(me ? [row(me.member, me.member.name, true)] : []),
 				...own.map((s) => row(s.member, s.member.name)),

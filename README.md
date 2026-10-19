@@ -39,7 +39,7 @@ pi install /path/to/pi-team
 
 角色卡、流程和定时提醒由使用方项目的 `.pi/peer.json` 配置，不随本包提供。配置与完整用法见各子包 README。
 
-Agent 可用 `peer_list`、`peer_send`、`peer_inbox` 通信，用 `orders_*` 工具建单、认领、交付和复核。角色配置 `canAssignRoles: true` 后，还可用 `peer_assign_role` 给同项目其他空闲会话分配角色，详见 [角色调度权限](pi-peer/README.md#角色调度权限)。`canStartSessions: true` 则独立授权 `peer_new_session`，让已有空闲 agent 新建会话并接收任务，详见 [会话交接](pi-peer/README.md#让已有-agent-新建会话)。
+Agent 可用 `peer_list`、`peer_send`、`peer_inbox` 通信，用 `orders_*` 工具建单、认领、交付和复核。角色配置 `canAssignRoles: true` 后，还可用 `peer_assign_role` 给同项目其他会话分配角色（在跑一轮的会话排队到这一轮结束），详见 [角色调度权限](pi-peer/README.md#角色调度权限)。`canStartSessions: true` 则独立授权 `peer_new_session`，让已有空闲 agent 新建会话并接收任务，详见 [会话交接](pi-peer/README.md#让已有-agent-新建会话)。
 
 工单 skill 只规定台账操作。角色分工、派工判断与验收标准由使用方项目确定；本包不要求安装额外的管理类 skill。
 

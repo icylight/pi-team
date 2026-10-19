@@ -57,7 +57,7 @@ description: 编辑 pi-peer 的项目配置——`.pi/peer.json`（启用开关�
 - `group.roles.<角色>.card`：角色卡路径（相对本项目）；也收字符串简写 `"owner": ".pi/characters/owner.md"`
 - `group.roles.<角色>.model`：完整 `provider/model-id`
 - `group.roles.<角色>.thinkingLevel`：`off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`
-- `group.roles.<角色>.canAssignRoles`：布尔值，默认 `false`；设为 `true` 后该角色可用 `peer_assign_role` 给同项目其他空闲在线会话分配角色（包括具备调度权限的角色）。授权范围由用户决定，不能因派工自行授予
+- `group.roles.<角色>.canAssignRoles`：布尔值，默认 `false`；设为 `true` 后该角色可用 `peer_assign_role` 给同项目其他在线会话分配角色（包括具备调度权限的角色）；目标在跑一轮时排队，这一轮结束后立即切换。授权范围由用户决定，不能因派工自行授予
 - `group.roles.<角色>.canStartSessions`：布尔值，默认 `false`；用户明确授权后可为同项目其他空闲 agent 新建会话并派发任务，与 `canAssignRoles` 独立；行为与失败核实见包 README「让已有 agent 新建会话」
 - `group.roles.<角色>.visibleTo`：角色名数组，默认不写（人人可见）。写了就让该角色在项目内隐身，只有名单里的基础角色在 `peer_list` 里看得到它、能给它发消息（含工单派工与交接）；跨项目不算名单内。实例名按基础角色算，`dev` 覆盖 `dev-2`
 - `group.flow`：流程文档路径
