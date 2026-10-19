@@ -107,7 +107,7 @@ export function isHumanActor(name: string): boolean {
 }
 
 /** 台账事件：只追加，不改。状态从哪来到哪去，问它 */
-export type EventKind = "create" | "state" | "field" | "handoff" | "dep-add" | "dep-remove";
+export type EventKind = "create" | "state" | "field" | "handoff" | "lock" | "unlock" | "dep-add" | "dep-remove";
 
 export interface OrderEvent {
 	id: number;
@@ -126,6 +126,18 @@ export interface OrderContent {
 	name: string;
 	/** 项目内 md 路径；入口本身不保证文件存在。 */
 	path: string;
+}
+
+/**
+ * 内容锁：口径定了就冻结，防止有人在执行途中改需求。
+ *
+ * 锁住的是「内容面」——标题、正文、内容入口、类型；状态、下一步、工时、终止依据不受影响，
+ * 那些本来就是推进过程中要动的。解锁要单独一次调用，理由与时刻都进动作记录。
+ */
+export interface ContentLock {
+	at: string;
+	/** 谁锁的 */
+	by: string;
 }
 
 export interface Order {
@@ -152,6 +164,8 @@ export interface Order {
 	deliveryVariance: string | null;
 	/** 可按占位继续的依据；空表示不可，必须等前置收口 */
 	placeholderBasis: string | null;
+	/** 内容锁；null 表示未锁 */
+	contentLock: ContentLock | null;
 	createdAt: string;
 	updatedAt: string;
 	/** 乐观锁版本号，防同一秒内的并发覆盖 */
@@ -233,6 +247,8 @@ export interface UpdateInput {
 	actualWaitMin?: number | null;
 	deliveryVariance?: string | null;
 	placeholderBasis?: string | null;
+	/** 锁定（true）或解锁（false）内容；解锁不能与本次的内容修改同时进行 */
+	contentLock?: boolean;
 }
 
 export interface ListFilter {

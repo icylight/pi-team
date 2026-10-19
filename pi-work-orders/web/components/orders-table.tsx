@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ActorName } from "@/components/human-actor";
 import { TypeLabel } from "@/components/order-type";
+import { ContentLockLabel } from "@/components/content-lock";
 import { StateBadge } from "@/components/state-badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { ListedOrder, StateDef, Waiting } from "../../core/types";
@@ -103,6 +104,11 @@ export function OrdersTable({
 								<Link className="hover:underline" href={`/p/${slug}/o/${encodeURIComponent(o.id)}`}>
 									{o.title}
 								</Link>
+								{o.contentLock ? (
+									<span className="ml-2 align-middle">
+										<ContentLockLabel lock={o.contentLock} />
+									</span>
+								) : null}
 								{waited ? (
 									<span className="ml-2 text-xs whitespace-nowrap text-amber-600 dark:text-amber-400">{waited}</span>
 								) : null}

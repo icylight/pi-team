@@ -4,9 +4,11 @@ import { notFound } from "next/navigation";
 import { StateBadge } from "@/components/state-badge";
 import { ActorName } from "@/components/human-actor";
 import { TypeLabel } from "@/components/order-type";
+import { ContentLockLabel } from "@/components/content-lock";
 import { Markdown } from "@/components/markdown";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ledgers, orderPage } from "@/lib/ledger";
+import { eventMove } from "../../../../../../core/format";
 import { formatAgo, minutesSince, nowMs, stamp } from "@/lib/time";
 
 export const dynamic = "force-dynamic";
@@ -75,6 +77,7 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 				<div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
 					<StateBadge state={view.state} states={states} />
 					{view.type ? <TypeLabel type={view.type} /> : null}
+					<ContentLockLabel lock={view.contentLock} />
 					<span>
 						下一步找谁：
 						{view.nextActors.length
@@ -138,7 +141,7 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 										</TableCell>
 										<TableCell className="text-sm">{e.actor}</TableCell>
 										<TableCell className="text-sm">
-											{e.fromState && e.toState ? `${e.fromState} → ${e.toState}` : e.toState || e.kind}
+											{eventMove(e)}
 										</TableCell>
 										<TableCell className="text-sm">{e.note}</TableCell>
 									</TableRow>

@@ -752,7 +752,7 @@ export default function (pi: ExtensionAPI) {
 		name: "orders_update",
 		label: "改工单",
 		description:
-			"改工单状态或字段。状态之间不校验转换，任何状态都能改（改到需要依据的状态时必须给依据）；正文以当前有效口径为准：范围修订直接用 body 覆盖旧口径（理由写进 reason），appendBody 只用于补一小段，别靠追加堆大部头。收口时回填实际工时与实际偏差。",
+			"改工单状态或字段。状态之间不校验转换，任何状态都能改（改到需要依据的状态时必须给依据）；正文以当前有效口径为准：范围修订直接用 body 覆盖旧口径（理由写进 reason），appendBody 只用于补一小段，别靠追加堆大部头。口径定了就 contentLock=true 锁住内容，之后改标题/正文/内容入口/类型要先单独解锁。收口时回填实际工时与实际偏差。",
 		parameters: Type.Object({
 			id: Type.String({ description: "工单号" }),
 			reason: Type.String({ description: "为什么这么改（必填）" }),
@@ -789,6 +789,12 @@ export default function (pi: ExtensionAPI) {
 				Type.String({ description: "偏差原因：实际与估算差在哪（等待、返工、范围变化…）" }),
 			),
 			placeholderBasis: Type.Optional(Type.String({ description: "可按占位继续的依据；传空串表示取消这个许可" })),
+			contentLock: Type.Optional(
+				Type.Boolean({
+					description:
+						"true 锁定内容（标题/正文/内容入口/类型），false 解锁；锁住后改内容必须先解锁，且解锁要单独一次调用。推进状态与回填工时不受锁定影响",
+				}),
+			),
 			expectedRevision: Type.Optional(Type.Number({ description: "手里这条的 rev，用于并发冲突检测" })),
 			actor: Type.Optional(Type.String({ description: "操作者名字，默认取本会话名" })),
 		}),
@@ -817,7 +823,8 @@ export default function (pi: ExtensionAPI) {
 						params.actualWallMin != null ||
 						params.actualWaitMin != null ||
 						params.deliveryVariance != null ||
-						params.placeholderBasis !== undefined;
+						params.placeholderBasis !== undefined ||
+						params.contentLock !== undefined;
 					// 正文追加跟字段写入走同一次 updateOrder：一起生效或一起回滚，
 					// 否则第二次调用报错时，正文已经落库，调用方却以为失败。
 					const view = needsPatch
@@ -846,6 +853,7 @@ export default function (pi: ExtensionAPI) {
 									actualWaitMin: params.actualWaitMin,
 									deliveryVariance: params.deliveryVariance,
 									placeholderBasis: params.placeholderBasis,
+									contentLock: params.contentLock,
 								},
 								actorCtx,
 								params.expectedRevision,

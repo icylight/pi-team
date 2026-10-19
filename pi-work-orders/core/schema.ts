@@ -21,7 +21,7 @@ import {
 	type TerminalKind,
 } from "./types.ts";
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 export const DEFAULT_DB_DIR = ".work-orders";
 export const DEFAULT_DB_NAME = "work-orders.sqlite";
 
@@ -49,6 +49,7 @@ CREATE TABLE orders (
   actual_wait_min     INTEGER,
   delivery_variance   TEXT,
   placeholder_basis   TEXT,
+  content_lock  TEXT CHECK (content_lock IS NULL OR (json_valid(content_lock) AND json_type(content_lock) = 'object')),
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL,
   revision      INTEGER NOT NULL DEFAULT 1
@@ -82,6 +83,10 @@ CREATE INDEX events_order  ON events(order_id, id);
  * 只加表、加列，不重建：旧库里已有的数据不动。
  */
 const MIGRATIONS: Record<number, string> = {
+	6: `
+ALTER TABLE orders ADD COLUMN content_lock TEXT
+  CHECK (content_lock IS NULL OR (json_valid(content_lock) AND json_type(content_lock) = 'object'));
+`,
 	5: `
 ALTER TABLE orders ADD COLUMN type TEXT;
 `,

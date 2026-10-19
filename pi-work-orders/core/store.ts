@@ -30,6 +30,7 @@ import {
 } from "./schema.ts";
 import {
 	type ActorContext,
+	type ContentLock,
 	type CreateInput,
 	type DeliveryDeviation,
 	ESTIMATE_WARN_RATIO,
@@ -99,6 +100,7 @@ function toOrder(row: Row): Order {
 		actualWaitMin: numOrNull(row.actual_wait_min),
 		deliveryVariance: row.delivery_variance == null ? null : String(row.delivery_variance),
 		placeholderBasis: row.placeholder_basis == null ? null : String(row.placeholder_basis),
+		contentLock: row.content_lock == null ? null : (JSON.parse(String(row.content_lock)) as ContentLock),
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 		revision: Number(row.revision),
@@ -450,6 +452,34 @@ export function updateOrder(
 	const section = patch.appendBody?.trim();
 	if (patch.appendBody != null && !section) throw new LedgerError("追加内容不能为空");
 
+	// 内容面：标题、正文、追加段、内容入口、类型。锁住之后动这些必须走解锁。
+	// 状态、下一步、工时、终止依据不在锁定范围里——那些正是在推进过程中该动的，锁住会让工单推不动。
+	const contentTouched =
+		patch.title !== undefined ||
+		replacement !== undefined ||
+		section !== undefined ||
+		patch.contents !== undefined ||
+		patch.type !== undefined;
+	const locking = patch.contentLock === true;
+	const unlocking = patch.contentLock === false;
+	// 先挑最具体的那条说：想「解锁并改内容」的一次性调用，报的是「分成两步」而不是笼统的「已锁定」
+	if (unlocking && contentTouched) {
+		throw new LedgerError("解锁与改内容分两步：这次只解锁（理由写清为什么要改），下一次调用再改内容");
+	}
+	if (old.contentLock && contentTouched) {
+		throw new LedgerError(
+			`内容已锁定（${old.contentLock.by} 于 ${old.contentLock.at.slice(0, 16).replace("T", " ")} 锁定）：` +
+				"改标题、正文、内容入口或类型之前先单独调用一次解锁（contentLock=false，理由写清为什么要改），改完再锁上；" +
+				"推进状态、改下一步找谁、回填工时不受锁定影响",
+		);
+	}
+	// 再锁一次不改原锁定时刻：冻结点是第一次定下来的那一下
+	const nextContentLock: ContentLock | null = locking
+		? (old.contentLock ?? { at: now(), by: ctx.actor })
+		: unlocking
+			? null
+			: old.contentLock;
+
 	const targetState = patch.state ?? old.state;
 	const nextDef = stateDef(db, targetState);
 	// 认领＝推到只许一个执行者的状态；这时执行者就是操作者本人，不用再手传
@@ -496,6 +526,7 @@ export function updateOrder(
 			patch.deliveryVariance === undefined ? old.deliveryVariance : patch.deliveryVariance?.trim() || null,
 		placeholderBasis:
 			patch.placeholderBasis === undefined ? old.placeholderBasis : patch.placeholderBasis?.trim() || null,
+		contentLock: nextContentLock,
 	};
 
 	if (nextDef.singleOwner) {
@@ -523,7 +554,7 @@ export function updateOrder(
 				`UPDATE orders SET title=?, body=?, contents=?, type=?, state=?, next_actors=?, closing_basis=?,
 			 estimate_active_min=?, estimate_wall_min=?, estimate_basis=?,
 			 actual_active_min=?, actual_wall_min=?, actual_wait_min=?, delivery_variance=?, placeholder_basis=?,
-			 updated_at=?, revision=revision+1 WHERE id=? AND (? IS NULL OR revision=?)`,
+			 content_lock=?, updated_at=?, revision=revision+1 WHERE id=? AND (? IS NULL OR revision=?)`,
 			)
 			.run(
 				next.title,
@@ -541,6 +572,7 @@ export function updateOrder(
 				next.actualWaitMin,
 				next.deliveryVariance,
 				next.placeholderBasis,
+				next.contentLock ? JSON.stringify(next.contentLock) : null,
 				now(),
 				id,
 				expectedRevision ?? null,
@@ -574,6 +606,15 @@ export function updateOrder(
 		}
 		if (!stateChanged && JSON.stringify(nextActors) !== JSON.stringify(old.nextActors)) {
 			logEvent(db, { orderId: id, actor: ctx.actor, kind: "handoff", note: ctx.reason });
+		}
+		// 锁定与解锁各有一步动作记录：谁在什么时候冻的、谁解开的，都在这里查
+		if (JSON.stringify(next.contentLock) !== JSON.stringify(old.contentLock)) {
+			logEvent(db, {
+				orderId: id,
+				actor: ctx.actor,
+				kind: next.contentLock ? "lock" : "unlock",
+				note: ctx.reason,
+			});
 		}
 		db.exec("COMMIT;");
 	} catch (error) {

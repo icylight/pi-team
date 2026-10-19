@@ -146,8 +146,9 @@ test("列表与详情都带出类型", () => {
 test("v5 的库升级后类型列为空，旧单不受影响", () => {
 	const { db, dbPath } = freshLedger();
 	createOrder(db, { title: "老数据", nextActors: ["dev"] }, owner);
-	// 退回 v5 结构：只退 v6 加的列
+	// 退回 v5 结构：退掉 v5 之后加的列（v6 的类型、v7 的内容锁）
 	db.exec("ALTER TABLE orders DROP COLUMN type;");
+	db.exec("ALTER TABLE orders DROP COLUMN content_lock;");
 	db.exec("PRAGMA user_version=5;");
 	db.close();
 

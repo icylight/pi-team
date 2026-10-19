@@ -94,6 +94,47 @@ async function call(tools, name, params, ctx) {
 	return out.content.map((c) => c.text).join("\n");
 }
 
+test("工具层能锁内容：锁定后改正文被拒，解锁要单独一次调用", async () => {
+	const cwd = tmpProject();
+	const { tools } = mount();
+	const ctx = ctxFor(cwd);
+	assert.ok(tools.get("orders_update").parameters.properties.contentLock);
+	await call(tools, "orders_init", {}, ctx);
+	const created = await call(
+		tools,
+		"orders_create",
+		{ title: "锁定演示", body: "原始口径", nextActors: ["dev"] },
+		ctx,
+	);
+	const id = /^(T\d+)/.exec(created)?.[1];
+	assert.ok(id, "建单应回报工单号");
+
+	const locked = await call(tools, "orders_update", { id, reason: "口径定稿", contentLock: true }, ctx);
+	assert.match(locked, /内容已锁定：dev 于 /);
+	const listed = await call(tools, "orders_list", {}, ctx);
+	assert.match(listed, /锁 {2}下一步找/, "列表有锁列");
+	const row = listed.split("\n").find((line) => line.startsWith(id));
+	assert.match(row ?? "", /锁/, "这一行在锁列标出已锁定");
+
+	const refused = await call(tools, "orders_update", { id, reason: "想改", body: "新口径" }, ctx);
+	assert.match(refused, /内容已锁定/);
+	assert.doesNotMatch(refused, /新口径/, "被拒的改动不该出现在回显里");
+	const shown = await call(tools, "orders_show", { id }, ctx);
+	assert.match(shown, /原始口径/);
+
+	const unlockAndEdit = await call(
+		tools,
+		"orders_update",
+		{ id, reason: "需求变了", contentLock: false, body: "新口径" },
+		ctx,
+	);
+	assert.match(unlockAndEdit, /解锁与改内容分两步/);
+	await call(tools, "orders_update", { id, reason: "需求变了" }, ctx);
+	await call(tools, "orders_update", { id, reason: "需求变了", contentLock: false }, ctx);
+	const edited = await call(tools, "orders_update", { id, reason: "按新需求改", body: "新口径" }, ctx);
+	assert.match(edited, /新口径/);
+});
+
 test("工具支持内容入口的建单、替换、清空与版本冲突", async () => {
 	const cwd = tmpProject();
 	const { tools } = mount();

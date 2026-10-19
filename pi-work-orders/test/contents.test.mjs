@@ -258,6 +258,7 @@ test("v3 升级仅加空入口，正文、状态、依赖、事件及版本号�
 		"actual_wait_min",
 		"delivery_variance",
 		"placeholder_basis",
+		"content_lock",
 	]) {
 		db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
 	}

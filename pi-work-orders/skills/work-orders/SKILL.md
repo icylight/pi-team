@@ -22,7 +22,7 @@ description: 用本机 SQLite 工单库记录多会话协作的状态——建�
 | 动作 | 工具 |
 | --- | --- |
 | 建 | `orders_init` 建库（可同时写本轮需求）；`orders_create` 建单，正文写目标、交付物、边界、验收口径；`type` 可选，写类型给这条归个类 |
-| 改 | `orders_update` 改状态/下一步/终止依据/类型，范围修订直接用 `body` 覆盖（正文只留当前有效口径）；`orders_dep` 加删依赖 |
+| 改 | `orders_update` 改状态/下一步/终止依据/类型，范围修订直接用 `body` 覆盖（正文只留当前有效口径）；口径定了 `contentLock=true` 锁住内容；`orders_dep` 加删依赖 |
 | 查 | `orders_list`（默认未收口；`ready` 只看能开工的；`next` 只看等某人的；`state` 看某个状态；`type` 看某个类型；回看历史加 `history=true`）、`orders_show`、`orders_requirement` |
 
 类型枚举默认 `需求单 · 实施单 · bug 单`，存在库的 `meta.types` 里：建库时用 `orders_init` 的 `types` 一次写定，之后改要直接写库。写枚举外的类型会被拒，不填就是未分类。
@@ -64,6 +64,7 @@ description: 用本机 SQLite 工单库记录多会话协作的状态——建�
 - 一个角色同时只能有一条在做——`singleOwner` 状态共享这条约束，接第二条前先把手上那条阻塞或收口
 - 需要依据的状态没给依据：默认集里结单必须带终止依据（证据指针：路径、命令、提交号都行），取消必须给理由或被谁取代
 - 依赖不能成环、不能指向自己
+- 内容已锁定：改标题、正文、内容入口、类型会被拒，报出锁定人与时刻；先单独解锁（`contentLock=false`）再改，解锁与改内容不能同一次调用
 - 类型不在配置的枚举里（不确定就用 `orders_list` 看已有单的分类，或问配置方）
 - 下一步找谁要写角色名，不写会话 key（`1423-311c` 这种重启即失效）；拿不准用 `/orders doctor` 查
 
@@ -82,6 +83,7 @@ description: 用本机 SQLite 工单库记录多会话协作的状态——建�
 - 前置依赖写进 `dependsOn`（列表有专门的依赖列）；标题只说要做什么，不写「T×× 之后」「依赖 ××」。
 - 正文写目标、交付物、边界、输入、验收与证据、回报。详细内容可用 `contents` 关联具名 md 入口，操作见 [README 的内容入口约定](../../README.md#内容入口一单多份-md)。验收口径在派工时写明。
 - 范围改了用 `body` 覆盖，正文只保留当前有效口径。旧口径不靠正文留：`reason` 写清改了什么、为什么改，动作记录落库可查。靠 `appendBody` 一节节堆下去，读到第三版就没人知道哪句还算数。
+- 口径达成一致就 `contentLock=true` 冻住（可与定稿那次 `body` 同一次调用）。之后要改先解锁——`lock`/`unlock` 两条动作记录就是这条口径的历史。锁定只盖内容面，推进状态与回填工时照常，别拿它当收口。
 - 有把握就给估算：`estimateActiveMin`（主动工时）、`estimateWallMin`（墙钟）、`estimateBasis`（依据与不确定的地方）。收口时回填 `actualActiveMin` / `actualWallMin` / `actualWaitMin` 与 `deliveryVariance`——偏差是算出来的，填的是原因。
 - 前置还没收、但可以先做一部分的，写 `placeholderBasis` 说明按什么占位继续；不写就是必须等。
 - 状态变更的 `reason` 必填，写的是**为什么**，不是「已更新」。

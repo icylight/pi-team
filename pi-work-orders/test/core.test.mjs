@@ -430,6 +430,99 @@ test("只改正文记 field，不动状态就不算重新开始等", () => {
 	assert.deepEqual(kinds, ["field", "create"]);
 });
 
+// ── 内容锁定 ────────────────────────────────────
+
+test("锁定后内容面一律拒绝，报出谁在什么时候锁的", () => {
+	const { db } = freshLedger();
+	const a = createOrder(db, { title: "甲", body: "原始口径", nextActors: ["dev"] }, owner);
+	const locked = updateOrder(db, a.id, { contentLock: true }, { actor: "owner", reason: "口径定了" });
+	assert.ok(locked.contentLock);
+	assert.equal(locked.contentLock.by, "owner");
+
+	for (const patch of [
+		{ title: "换个标题" },
+		{ body: "换个口径" },
+		{ appendBody: "补一段" },
+		{ contents: [{ name: "需求", path: "docs/a.md" }] },
+		{ type: "实施单" },
+	]) {
+		assert.throws(
+			() => updateOrder(db, a.id, patch, { actor: "dev", reason: "想改" }),
+			/内容已锁定（owner 于 .* 锁定）/,
+			`${JSON.stringify(patch)} 应该被锁定拦住`,
+		);
+	}
+	const after = getOrder(db, a.id);
+	assert.equal(after.body, "原始口径", "被拒的改动不落库");
+	assert.equal(after.title, "甲");
+});
+
+test("锁定只盖内容面：推进状态、改下一步、回填工时照常", () => {
+	const { db } = freshLedger();
+	const a = createOrder(db, { title: "甲", nextActors: ["dev"] }, owner);
+	updateOrder(db, a.id, { contentLock: true }, owner);
+	const claimed = updateOrder(
+		db,
+		a.id,
+		{ state: "在做", estimate: { activeMin: 30 }, actual: { activeMin: 20 } },
+		{ actor: "dev", reason: "接了并回填" },
+	);
+	assert.equal(claimed.state, "在做");
+	assert.deepEqual(claimed.nextActors, ["dev"]);
+	assert.equal(claimed.actual.activeMin, 20);
+	assert.ok(claimed.contentLock, "推进状态不解锁");
+});
+
+test("解锁与改内容不能同一次调用：分两步才成", () => {
+	const { db } = freshLedger();
+	const a = createOrder(db, { title: "甲", nextActors: ["dev"] }, owner);
+	updateOrder(db, a.id, { contentLock: true }, owner);
+	assert.throws(
+		() => updateOrder(db, a.id, { contentLock: false, body: "新口径" }, { actor: "owner", reason: "改需求" }),
+		/解锁与改内容分两步/,
+	);
+	assert.equal(getOrder(db, a.id).body, "");
+	assert.equal(
+		updateOrder(db, a.id, { contentLock: false }, { actor: "owner", reason: "需求变了" }).contentLock,
+		null,
+	);
+	const edited = updateOrder(db, a.id, { body: "新口径" }, { actor: "owner", reason: "按新需求改" });
+	assert.equal(edited.body, "新口径");
+	assert.equal(edited.contentLock, null, "改完不自动再锁，要显式锁");
+});
+
+test("可以先改内容再顺手锁上，一次调用完成定稿", () => {
+	const { db } = freshLedger();
+	const a = createOrder(db, { title: "甲", nextActors: ["dev"] }, owner);
+	const view = updateOrder(db, a.id, { body: "定稿口径", contentLock: true }, { actor: "owner", reason: "口径定稿" });
+	assert.equal(view.body, "定稿口径");
+	assert.equal(view.contentLock.by, "owner");
+});
+
+test("重复锁定保留第一次的冻结点与锁定人", () => {
+	const { db } = freshLedger();
+	const a = createOrder(db, { title: "甲", nextActors: ["dev"] }, owner);
+	const first = updateOrder(db, a.id, { contentLock: true }, { actor: "owner", reason: "定稿" });
+	const again = updateOrder(db, a.id, { contentLock: true }, { actor: "qa", reason: "再确认一次" });
+	assert.deepEqual(again.contentLock, first.contentLock);
+});
+
+test("锁定与解锁各记一条动作记录，理由落在记录里", () => {
+	const { db } = freshLedger();
+	const a = createOrder(db, { title: "甲", nextActors: ["dev"] }, owner);
+	updateOrder(db, a.id, { contentLock: true }, { actor: "owner", reason: "口径定稿，冻结" });
+	updateOrder(db, a.id, { contentLock: false }, { actor: "dev", reason: "上游需求改了" });
+	const events = eventsOf(db, a.id);
+	assert.deepEqual(
+		events.map((e) => [e.actor, e.kind, e.note]),
+		[
+			["dev", "unlock", "上游需求改了"],
+			["owner", "lock", "口径定稿，冻结"],
+			["owner", "create", "测试"],
+		],
+	);
+});
+
 // ── 旧库升级 ────────────────────────────────────
 
 test("v2 的库打开时逐版升级，数据不动", () => {
@@ -448,6 +541,7 @@ test("v2 的库打开时逐版升级，数据不动", () => {
 		"actual_wait_min",
 		"delivery_variance",
 		"placeholder_basis",
+		"content_lock",
 	]) {
 		db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
 	}

@@ -48,6 +48,23 @@ function formatActors(actors: string[], width?: number): string {
 	return width ? pad(head + rest, width) : head + rest;
 }
 
+/** 动作用词：状态推进看 from→to，其余按 kind 给中文——内部枚举不甩到人和 agent 面前 */
+const KIND_LABELS: Record<OrderEvent["kind"], string> = {
+	create: "建单",
+	state: "状态",
+	field: "改字段",
+	handoff: "换人",
+	lock: "锁内容",
+	unlock: "解锁",
+	"dep-add": "加依赖",
+	"dep-remove": "删依赖",
+};
+
+export function eventMove(e: OrderEvent): string {
+	if (e.fromState && e.toState) return `${e.fromState} → ${e.toState}`;
+	return e.toState ?? KIND_LABELS[e.kind] ?? e.kind;
+}
+
 export function formatList(orders: ListedOrder[], heading?: string, waiting: Waiting[] = []): string {
 	if (!orders.length) return heading ? `${heading}：没有匹配的工单` : "没有匹配的工单";
 	const reasons = new Map(waiting.filter((w) => w.kind !== "action").map((w) => [w.order.id, formatWaitingReason(w)]));
@@ -55,12 +72,13 @@ export function formatList(orders: ListedOrder[], heading?: string, waiting: Wai
 		const id = pad(o.id, 6);
 		const state = pad(o.state, 6);
 		const type = pad(o.type ?? "-", 8);
+		const lock = pad(o.contentLock ? "锁" : "-", 4);
 		const who = formatActors(o.nextActors, 10);
 		const dep = o.dependsOn.length ? short(o.dependsOn.join(", "), 24) : "-";
 		const reason = reasons.get(o.id);
-		return `${id}${state}${type}${who}${pad(dep, 14)}${short(o.title, 70)}${reason ? `｜${reason}` : ""}`;
+		return `${id}${state}${type}${lock}${who}${pad(dep, 14)}${short(o.title, 70)}${reason ? `｜${reason}` : ""}`;
 	});
-	const head = `${pad("id", 6)}${pad("状态", 6)}${pad("类型", 8)}${pad("下一步找", 10)}${pad("依赖", 14)}标题`;
+	const head = `${pad("id", 6)}${pad("状态", 6)}${pad("类型", 8)}${pad("锁", 4)}${pad("下一步找", 10)}${pad("依赖", 14)}标题`;
 	const body = [head, ...lines].join("\n");
 	return heading ? `${heading}（${orders.length} 条）\n${body}` : body;
 }
@@ -109,6 +127,10 @@ export function formatOrder(view: OrderView, extra: { deviation?: DeliveryDeviat
 	const effort = formatEffort(view, extra.deviation);
 	if (effort.length) lines.push(...effort);
 	if (view.closingBasis) lines.push(`终止依据：${view.closingBasis}`);
+	if (view.contentLock)
+		lines.push(
+			`内容已锁定：${view.contentLock.by} 于 ${view.contentLock.at.slice(0, 16).replace("T", " ")} 锁定｜改标题/正文/内容入口/类型要先解锁（contentLock=false）`,
+		);
 	lines.push(
 		`时间：建于 ${view.createdAt.slice(0, 16).replace("T", " ")}｜改于 ${view.updatedAt.slice(0, 16).replace("T", " ")}｜rev ${view.revision}`,
 	);
@@ -129,7 +151,7 @@ export function formatHistory(events: OrderEvent[]): string {
 	return events
 		.map((e) => {
 			const when = e.at.slice(5, 16).replace("T", " ");
-			const move = e.fromState && e.toState ? `${e.fromState} → ${e.toState}` : (e.toState ?? e.kind);
+			const move = eventMove(e);
 			const note = e.note ? `｜${short(e.note, 50)}` : "";
 			return `${when} ${e.actor} ${move}${note}`;
 		})

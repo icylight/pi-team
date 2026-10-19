@@ -39,6 +39,7 @@ const V5_PLUS_COLUMNS = [
 	"actual_wait_min",
 	"delivery_variance",
 	"placeholder_basis",
+	"content_lock",
 ];
 
 function downgradeToV4(db) {
