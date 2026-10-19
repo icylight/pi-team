@@ -93,9 +93,17 @@ export interface Member {
 export const BUSY_STALE_MS = 30 * 60_000;
 
 // AI(TAG): [角色调度] 控制消息由接收进程校验并执行，不把消息正文当授权。
-// 目标在跑一轮时不打断：受理后排队，agent_end 里立刻切换，并用同一个 requestId 回第二次结果。
+// 目标在跑一轮时默认打断（abort 这一轮），受理后在 agent_end 里立刻切换，用同一个 requestId 回第二次结果。
 export type RoleControl =
-	| { kind: "assign-role"; role: string; expiresAt: number; expectedRole?: string; expectedName: string }
+	| {
+			kind: "assign-role";
+			role: string;
+			expiresAt: number;
+			expectedRole?: string;
+			expectedName: string;
+			/** 目标在跑一轮时是否打断；不写按打断处理。旧版目标只认排队 */
+			interrupt?: boolean;
+	  }
 	| {
 			kind: "assign-role-result";
 			requestId: string;

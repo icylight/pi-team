@@ -216,8 +216,8 @@ export default function (pi: ExtensionAPI) {
 			const queued = queuedAssignments.get(control.requestId);
 			if (queued?.to !== msg.from) return;
 			queuedAssignments.delete(control.requestId);
-			if (control.ok === true) ctxRef.ui.notify(`pi-peer: 排队中的角色分配已执行（${queued.role}）`, "info");
-			else ctxRef.ui.notify(`pi-peer: 排队中的角色分配未执行（${queued.role}）：${control.detail}`, "warning");
+			if (control.ok === true) ctxRef.ui.notify(`pi-peer: 待执行的角色分配已执行（${queued.role}）`, "info");
+			else ctxRef.ui.notify(`pi-peer: 待执行的角色分配未执行（${queued.role}）：${control.detail}`, "warning");
 			return;
 		}
 		if (control?.kind !== "assign-role") return;
@@ -239,7 +239,8 @@ export default function (pi: ExtensionAPI) {
 			// 会话切换与人工改角色正在改身份：这一笔排队会在新身份上生效，不接
 			reply(false, "目标正在切换会话或角色，未排队，请稍后重试", "dropped");
 		else if (self.busy || !ctxRef.isIdle()) {
-			// 正在跑一轮：受理并排队，这一轮结束后在 agent_end 里立刻切换
+			// 正在跑一轮：先挂号再打断，abort 之后 agent_end 里立刻切换；调用方要它跑完再传 interrupt: false
+			const interrupt = control.interrupt !== false;
 			const previous = queuedRole;
 			queuedRole = {
 				requestId: msg.id,
@@ -262,11 +263,21 @@ export default function (pi: ExtensionAPI) {
 						kind: "assign-role-result",
 						requestId: previous.requestId,
 						ok: false,
-						detail: `排队中的分配已被新请求取代（改为 ${control.role}）`,
+						detail: `待执行的分配已被新请求取代（改为 ${control.role}）`,
 						state: "dropped",
 					});
 			}
-			reply(true, `目标在跑一轮，已排队：这一轮结束后立即切换为 ${control.role}`, "queued");
+			if (interrupt) {
+				ctxRef.abort();
+				if (ctxRef.hasUI) ctxRef.ui.notify(`pi-peer: 收到角色分配（${control.role}），已打断当前这一轮`);
+			}
+			reply(
+				true,
+				interrupt
+					? `目标在跑一轮，已打断：这一轮收尾后立即切换为 ${control.role}`
+					: `目标在跑一轮，已排队：这一轮结束后立即切换为 ${control.role}`,
+				"queued",
+			);
 		} else {
 			let detail: string;
 			let ok = false;
@@ -316,16 +327,16 @@ export default function (pi: ExtensionAPI) {
 		};
 		const callerRole = store?.listMembers().find((member) => member.key === queued.from)?.role;
 		if (!canAssign(callerRole)) {
-			finish(false, "调用者已失去 canAssignRoles 权限，排队中的分配未执行");
+			finish(false, "调用者已失去 canAssignRoles 权限，待执行的分配未执行");
 			return;
 		}
 		if (!self || !ctxRef) return;
 		if (self.role !== queued.expectedRole || self.name !== queued.expectedName) {
-			finish(false, "目标角色已变化，排队中的分配作废");
+			finish(false, "目标角色已变化，待执行的分配作废");
 			return;
 		}
 		if (!resolveRoleCard(ctxRef.cwd, loaded.config, queued.role, CONFIG_DIR_NAME).path) {
-			finish(false, "目标角色卡已不存在，排队中的分配未执行");
+			finish(false, "目标角色卡已不存在，待执行的分配未执行");
 			return;
 		}
 		try {
@@ -422,7 +433,7 @@ export default function (pi: ExtensionAPI) {
 		sessions.dispose();
 		for (const pending of assignments.values()) pending.finish(false, "会话已切换，分配结果未确认");
 		// 换会话后排队分配会落到新身份上，宁可丢
-		dropQueuedRole("目标会话已切换，排队中的分配未执行");
+		dropQueuedRole("目标会话已切换，待执行的分配未执行");
 		queuedAssignments.clear();
 		teardown();
 
@@ -614,7 +625,7 @@ export default function (pi: ExtensionAPI) {
 		sessions.dispose();
 		for (const pending of assignments.values()) pending.finish(false, "会话已关闭，分配结果未确认");
 		// 进程要结束了：给受理过的调用方一条未执行，别让它等到下次上线才发现
-		dropQueuedRole("目标会话已关闭，排队中的分配未执行");
+		dropQueuedRole("目标会话已关闭，待执行的分配未执行");
 		queuedAssignments.clear();
 		teardown();
 	});
@@ -845,10 +856,15 @@ export default function (pi: ExtensionAPI) {
 		name: "peer_assign_role",
 		label: "Peer Assign Role",
 		description:
-			"给同项目其他在线 pi 会话设定角色；调用者当前角色须配置 canAssignRoles: true。目标空闲时立即切换，正在跑一轮时排队、这一轮结束后立即切换。返回受理结果，排队不代表已切换。不新建进程，也不清空目标上下文，不改目标的模型与思考强度。",
+			"给同项目其他在线 pi 会话设定角色；调用者当前角色须配置 canAssignRoles: true。目标空闲时立即切换；目标在跑一轮时默认打断这一轮（abort）并在收尾后立即切换，传 interrupt: false 才等它跑完。返回受理结果，受理不代表已切换。不新建进程，也不清空目标上下文，不改目标的模型与思考强度。",
 		parameters: Type.Object({
 			to: Type.String({ description: "同项目目标会话的名称、id 或 pid，先用 peer_list 查看" }),
 			role: Type.String({ description: "要分配的角色名，须有有效角色卡" }),
+			interrupt: Type.Optional(
+				Type.Boolean({
+					description: "目标在跑一轮时是否打断它（默认 true，打断后收尾即切换）；false 则等这一轮自己跑完",
+				}),
+			),
 		}),
 		async execute(_id, params, signal) {
 			if (!store || !self) throw new Error("pi-peer 未启用");
@@ -872,6 +888,7 @@ export default function (pi: ExtensionAPI) {
 					expiresAt: Date.now() + 8_000,
 					expectedRole: target.member.role,
 					expectedName: target.member.name,
+					interrupt: params.interrupt !== false,
 				});
 				const finish = (ok: boolean, detail: string, state?: "queued" | "applied" | "dropped") => {
 					clearTimeout(timer);
@@ -886,7 +903,7 @@ export default function (pi: ExtensionAPI) {
 						resolve(
 							text(
 								state === "queued"
-									? `${detail}｜排队不等于已切换，peer_list 里标着「待切」；执行后会在本会话提示`
+									? `${detail}｜受理不等于已切换，peer_list 里标着「待切」；执行后会在本会话提示`
 									: detail,
 							),
 						);

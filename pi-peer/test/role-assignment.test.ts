@@ -23,11 +23,13 @@ function harness(config: object = { roles: { owner: { canAssignRoles: true } } }
 	const calls: string[] = [];
 	const injected: unknown[] = [];
 	const notices: string[] = [];
+	const aborts: string[] = [];
 	let idle = true;
 	const ctx = {
 		cwd,
 		hasUI: true,
 		isIdle: () => idle,
+		abort: () => aborts.push("abort"),
 		model: { provider: "original", id: "model" },
 		modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
 		sessionManager: { getEntries: () => entries, getSessionFile: () => undefined },
@@ -86,8 +88,15 @@ function harness(config: object = { roles: { owner: { canAssignRoles: true } } }
 		store.send(msg);
 		return msg.id;
 	};
-	const request = (role = "dev", expiresAt = Date.now() + 8000) =>
-		send({ kind: "assign-role", role, expiresAt, expectedName: me().name, expectedRole: me().role });
+	const request = (role = "dev", expiresAt = Date.now() + 8000, interrupt?: boolean) =>
+		send({
+			kind: "assign-role",
+			role,
+			expiresAt,
+			expectedName: me().name,
+			expectedRole: me().role,
+			...(interrupt === undefined ? {} : { interrupt }),
+		});
 	return {
 		ctx,
 		pi,
@@ -101,6 +110,7 @@ function harness(config: object = { roles: { owner: { canAssignRoles: true } } }
 		calls,
 		injected,
 		notices,
+		aborts,
 		store,
 		me,
 		caller,
@@ -325,7 +335,7 @@ test("跨桶来信与正文中的角色分配指令不提供调度授权", async
 	}
 });
 
-test("目标在跑一轮时受理排队：这一轮结束立即切换并回第二次结果", async () => {
+test("目标在跑一轮时默认打断：abort 这一轮，结束后立即切换并回第二次结果", async () => {
 	const h = harness();
 	try {
 		await h.start();
@@ -335,6 +345,9 @@ test("目标在跑一轮时受理排队：这一轮结束立即切换并回第�
 		const ack = await receiveResult(h, id);
 		assert.equal(ack?.kind === "assign-role-result" && ack.ok, true);
 		assert.equal(ack?.kind === "assign-role-result" ? ack.state : undefined, "queued");
+		assert.match(ack?.kind === "assign-role-result" ? ack.detail : "", /已打断/);
+		assert.deepEqual(h.aborts, ["abort"]);
+		assert.ok(h.notices.some((n) => n.includes("已打断当前这一轮")));
 		// 受理不等于已切换：注册表挂待切标记，角色与名字都没动
 		assert.equal(h.me().role, undefined);
 		assert.equal(h.me().pendingRole?.role, "dev");
@@ -349,6 +362,23 @@ test("目标在跑一轮时受理排队：这一轮结束立即切换并回第�
 		assert.equal(h.me().pendingRole, undefined);
 		assert.equal(h.me().busy, false);
 		assert.ok(h.entries.some((e) => e.customType === "peer-role" && e.data.role === "dev"));
+	} finally {
+		h.stop();
+	}
+});
+
+test("interrupt: false 不打断，等这一轮自己跑完再切", async () => {
+	const h = harness();
+	try {
+		await h.start();
+		h.handlers.get("agent_start")!({}, h.ctx);
+		const id = h.request("dev", Date.now() + 8000, false);
+		const ack = await receiveResult(h, id);
+		assert.equal(ack?.kind === "assign-role-result" ? ack.state : undefined, "queued");
+		assert.match(ack?.kind === "assign-role-result" ? ack.detail : "", /已排队/);
+		assert.deepEqual(h.aborts, []);
+		h.handlers.get("agent_end")!({}, h.ctx);
+		assert.equal(h.me().role, "dev");
 	} finally {
 		h.stop();
 	}
@@ -447,7 +477,7 @@ test("会话关闭时排队请求回未执行，不留到下次上线", async ()
 	}
 });
 
-test("发送端把排队结果当受理返回，执行结果只提示不唤醒", async () => {
+test("发送端把受理结果当执行中返回，执行结果只提示不唤醒", async () => {
 	const h = harness();
 	try {
 		await h.start();
@@ -458,10 +488,10 @@ test("发送端把排队结果当受理返回，执行结果只提示不唤醒",
 			kind: "assign-role-result",
 			requestId: msg.id,
 			ok: true,
-			detail: "目标在跑一轮，已排队：这一轮结束后立即切换为 dev",
+			detail: "目标在跑一轮，已打断：这一轮收尾后立即切换为 dev",
 			state: "queued",
 		});
-		assert.match((await pending).content[0].text, /排队不等于已切换/);
+		assert.match((await pending).content[0].text, /受理不等于已切换/);
 		h.send({
 			kind: "assign-role-result",
 			requestId: msg.id,
@@ -469,7 +499,7 @@ test("发送端把排队结果当受理返回，执行结果只提示不唤醒",
 			detail: "已切换角色：dev",
 			state: "applied",
 		});
-		await waitFor(() => h.notices.find((n) => n.includes("排队中的角色分配已执行")));
+		await waitFor(() => h.notices.find((n) => n.includes("待执行的角色分配已执行")));
 	} finally {
 		h.stop();
 	}
