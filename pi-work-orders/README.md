@@ -287,6 +287,20 @@ skills/work-orders/   给 agent 看的操作约定
 
 `core/` 不 import 任何 pi 的东西，换壳（CLI、别的 harness）时可直接复用。
 
+## 开发
+
+```bash
+npm test                                        # node --test test/*.test.mjs
+export PATH="$HOME/.pi/node_modules/.bin:$PATH"  # tsc 与 biome 装在 ~/.pi 仓库根
+tsc --noEmit
+biome check --error-on-warnings .
+```
+
+`tsc` 与 `biome` 是整仓根的 devDeps，包自己的 `node_modules` 里只有运行时依赖：不把根 `.bin` 加进 PATH 就报
+「找不到命令」，看着像没装、其实是装在了上一层。改完 `biome check --write .` 就地修格式。
+
+`tsc` 在整仓根跑（`include` 同时覆盖 `pi-peer` 与 `pi-work-orders`），不在包目录里跑。
+
 ## 库结构
 
 `meta`（需求、状态集与类型枚举的覆盖、编号前缀）、`orders`、`deps`、`events`。

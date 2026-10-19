@@ -271,7 +271,11 @@ test("配了 prompt：替换末尾提示词，占位符按本轮读数填，读�
 	agingEvent(db, mine.id, 90);
 	agingEvent(db, other.id, 50);
 
-	const configured = { ...base, intervalMinutes: 7, prompt: "{me} 这轮 {count} 条，每 {interval}m 一次\n第二行照原样保留" };
+	const configured = {
+		...base,
+		intervalMinutes: 7,
+		prompt: "{me} 这轮 {count} 条，每 {interval}m 一次\n第二行照原样保留",
+	};
 	const note = buildWatchText(db, { me: "owner", config: configured });
 	const lines = note.text.split("\n");
 	assert.match(lines[0], /这轮 2 条（每 7m 自查）：停滞 2 条/, "读数区沿用配置值，模板不参与");
