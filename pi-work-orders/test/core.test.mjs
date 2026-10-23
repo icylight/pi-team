@@ -546,6 +546,7 @@ test("v2 的库打开时逐版升级，数据不动", () => {
 		db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
 	}
 	db.exec("DROP TABLE events;");
+	db.exec("DROP TABLE comments;");
 	db.exec("PRAGMA user_version=2;");
 	db.close();
 

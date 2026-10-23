@@ -120,6 +120,19 @@ export interface OrderEvent {
 	/** 为什么这么动（状态变更的 reason）/ 依赖边的说明 */
 	note: string;
 	at: string;
+	/** 这次动作写完之后工单是第几版；迁移前的旧事件为 null */
+	revision: number | null;
+}
+
+/** 一条评论：与动作分开记，不推状态、不涨 revision、不触发交接通知 */
+export interface OrderComment {
+	id: number;
+	orderId: string;
+	actor: string;
+	body: string;
+	/** 作者当时看到的工单版本；没写就是 null */
+	revision: number | null;
+	at: string;
 }
 
 export interface OrderContent {

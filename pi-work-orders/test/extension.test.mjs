@@ -218,6 +218,7 @@ test("工具支持内容入口的建单、替换、清空与版本冲突", async
 test("扩展注册工单工具、通知查询和 orders 命令", () => {
 	const { tools, commands } = mount();
 	assert.deepEqual([...tools.keys()].sort(), [
+		"orders_comment",
 		"orders_create",
 		"orders_dep",
 		"orders_init",
@@ -542,7 +543,7 @@ test("会话没名字时 actor 落在「用户」上，不写成 pid 形式的�
 	const show = await call(tools, "orders_show", { id: "T01" }, ctx);
 
 	assert.match(show, /最近动作/);
-	assert.match(show, /用户 待认领｜建单/, "记的是用户，不是 目录名-pid");
+	assert.match(show, /rev1 用户 待认领｜建单/, "记的是用户，不是 目录名-pid");
 
 	// 认领后归属也留在「用户」上，重启会话照样接得住
 	const claimed = await call(tools, "orders_update", { id: "T01", state: "在做", reason: "开始做" }, ctx);
@@ -565,7 +566,7 @@ test("会话启动时问一次 peer 身份，之后工具调用都按角色名�
 
 	await call(tools, "orders_create", { title: "复核某项", nextActors: ["qa"] }, ctx);
 	const show = await call(tools, "orders_show", { id: "T01" }, ctx);
-	assert.match(show, /qa 待认领｜建单/);
+	assert.match(show, /rev1 qa 待认领｜建单/);
 });
 
 test("派工要求对方空闲：忙的不投，如实回报", async () => {
@@ -700,4 +701,30 @@ test("工单类型：建库写枚举，建单与列表按枚举校验，空串�
 	assert.doesNotMatch(cleared.split("─")[0], /类型：/);
 	const stillOther = await call(tools, "orders_show", { id: "T02" }, ctx);
 	assert.match(stillOther, /类型：需求/);
+});
+
+test("工具层能评论：写进 orders_show，状态与 rev 都不动", async () => {
+	const cwd = tmpProject();
+	const { tools } = mount("qa");
+	const ctx = ctxFor(cwd);
+	await call(tools, "orders_init", {}, ctx);
+	await call(tools, "orders_create", { title: "复核某项", nextActors: ["qa"] }, ctx);
+
+	const wrote = await call(tools, "orders_comment", { id: "T01", body: "判据 2 的读数取自 main", revision: 1 }, ctx);
+	assert.match(wrote, /评论 #1 已记录/);
+	assert.match(wrote, /当前 rev1/);
+
+	const show = await call(tools, "orders_show", { id: "T01" }, ctx);
+	assert.match(show, /评论：/);
+	assert.match(show, /qa rev1｜判据 2 的读数取自 main/);
+	assert.match(show, /状态：待认领/, "评论不推状态");
+	assert.match(show, /rev 1/, "评论不涨版本");
+
+	// 带错版本不拒绝：指出差异就够，评论本来就是回头看那条单的工具
+	const stale = await call(tools, "orders_comment", { id: "T01", body: "晚到的看法", revision: 0 }, ctx);
+	assert.match(stale, /你指的是 rev0，当前已是 rev1/);
+
+	// 空内容被拒，不落脏行
+	const empty = await call(tools, "orders_comment", { id: "T01", body: "  " }, ctx);
+	assert.match(empty, /失败：评论内容不能为空/);
 });

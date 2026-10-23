@@ -165,6 +165,14 @@ cd pi-work-orders/web && npm install && npm run build
 
 `orders_show` 写一行锁定人与锁定时刻；`orders_list` 有「锁」列；看板列表与工单页在标题旁标「内容锁定」。
 
+## 版本号与评论
+
+`revision` 每写一次 +1（建单是 1）。三处露出来：`orders_list` 的 `rev` 列、`orders_show` 的「rev N」、每条动作记录（记的是这次写完之后是第几版）。
+
+跨会话说同一张单时带上它：`T644 已取消（rev 6）`。对方一读就知道自己手上是不是同一版；不带版本号的两条消息，分不清「同时发出」和「一方没读」。`orders_update` 的 `expectedRevision` 就是拿它拦并发。
+
+评论走另一路：`orders_comment` 记「为什么这么判、看到什么」。它与动作分开——不推状态、不涨 `rev`、不触发交接通知，只进 `orders_show` 的评论段。写入后不改不删；可以带 `revision` 标明针对哪一版，只记录不校验。升级前的旧动作记录没有版本号，显示时省掉。
+
 ## 自动推进
 
 单子卡在「建了没人接」上，机制上要管住两件事：让它可见，让它叫得动人。
@@ -248,11 +256,12 @@ cd pi-work-orders/web && npm install && npm run build
 |---|---|
 | `orders_init` | 建库，同时写本轮需求（目标/边界/验收口径/基线）与可选配置：编号前缀 `idPrefix`、类型枚举 `types` |
 | `orders_list` | 列单：默认未收口；`ready` 只看可开工的；`next` 只看等某人的；`state` 看某个状态（终态也算命中）；`type` 看某个类型；`history=true` 连终态一起列 |
-| `orders_show` | 看一条的正文、内容入口、依赖、下游、估算与实际、终止依据、现场（依赖进展 / 上游产物 / 能否占位 / 要不要重读），以及最近几次动作（默认 5 条） |
+| `orders_show` | 看一条的正文、内容入口、依赖、下游、估算与实际、终止依据、现场（依赖进展 / 上游产物 / 能否占位 / 要不要重读），最近几次动作（默认 5 条）与评论（默认 5 条，`comments=0` 不看）。列表、详情、动作记录都带 `rev` |
 | `orders_notifications` | 只读查询通知状态和原因，`id` 可限工单；返回最近更新的通知记录，不表示认领 |
 | `orders_create` | 建单，可带 `dependsOn` 与 `type`（须在枚举内）；`nextActors` 传名字数组（首选在前）；可选估算 `estimateActiveMin` / `estimateWallMin` / `estimateBasis` 与占位许可 `placeholderBasis` |
 | `orders_update` | 改状态或字段；`nextActors` 给多人就是重设备选，`type` 传空串清空分类。范围修订用 `body` 覆盖（正文只留当前有效口径，旧口径靠 `reason` 与动作记录留痕），`appendBody` 只用于补一小段。口径定了用 `contentLock=true` 锁住内容（见[内容锁定](#内容锁定)）。收口回填 `actualActiveMin` / `actualWallMin` / `actualWaitMin` / `deliveryVariance`。所有字段同一次事务，要么全成要么全不动；`body` 传空串表示这次不改正文 |
 | `orders_dep` | 加/删依赖边 |
+| `orders_comment` | 留一条评论：为什么这么判、看到什么、留给后面接手的人。与动作分开：不推状态、不涨 `rev`、不触发交接通知；写入后不改不删。可带 `revision` 标明针对哪一版，只记录不校验 |
 | `orders_requirement` | 看/改本轮需求，交付前对照 |
 
 命令：`/orders [ready|stale|mine|all|doctor]`。`stale` 看停滞，`mine` 看等自己的，`doctor` 查会静默失效的写法。

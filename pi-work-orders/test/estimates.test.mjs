@@ -44,6 +44,8 @@ const V5_PLUS_COLUMNS = [
 
 function downgradeToV4(db) {
 	for (const column of V5_PLUS_COLUMNS) db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
+	db.exec("ALTER TABLE events DROP COLUMN revision;");
+	db.exec("DROP TABLE comments;");
 	db.exec("PRAGMA user_version=4;");
 }
 

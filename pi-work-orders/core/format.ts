@@ -4,7 +4,7 @@
  * 目标是一眼能扫：谁的活、卡在哪、下一步找谁。细节靠 orders_show。
  */
 
-import type { DeliveryDeviation, ListedOrder, OrderEvent, OrderView, Waiting } from "./types.ts";
+import type { DeliveryDeviation, ListedOrder, OrderComment, OrderEvent, OrderView, Waiting } from "./types.ts";
 
 export function short(text: string, max = 60): string {
 	const one = text.replace(/\s+/g, " ").trim();
@@ -70,15 +70,16 @@ export function formatList(orders: ListedOrder[], heading?: string, waiting: Wai
 	const reasons = new Map(waiting.filter((w) => w.kind !== "action").map((w) => [w.order.id, formatWaitingReason(w)]));
 	const lines = orders.map((o) => {
 		const id = pad(o.id, 6);
+		const rev = pad(String(o.revision), 5);
 		const state = pad(o.state, 6);
 		const type = pad(o.type ?? "-", 8);
 		const lock = pad(o.contentLock ? "锁" : "-", 4);
 		const who = formatActors(o.nextActors, 10);
 		const dep = o.dependsOn.length ? short(o.dependsOn.join(", "), 24) : "-";
 		const reason = reasons.get(o.id);
-		return `${id}${state}${type}${lock}${who}${pad(dep, 14)}${short(o.title, 70)}${reason ? `｜${reason}` : ""}`;
+		return `${id}${rev}${state}${type}${lock}${who}${pad(dep, 14)}${short(o.title, 70)}${reason ? `｜${reason}` : ""}`;
 	});
-	const head = `${pad("id", 6)}${pad("状态", 6)}${pad("类型", 8)}${pad("锁", 4)}${pad("下一步找", 10)}${pad("依赖", 14)}标题`;
+	const head = `${pad("id", 6)}${pad("rev", 5)}${pad("状态", 6)}${pad("类型", 8)}${pad("锁", 4)}${pad("下一步找", 10)}${pad("依赖", 14)}标题`;
 	const body = [head, ...lines].join("\n");
 	return heading ? `${heading}（${orders.length} 条）\n${body}` : body;
 }
@@ -152,8 +153,22 @@ export function formatHistory(events: OrderEvent[]): string {
 		.map((e) => {
 			const when = e.at.slice(5, 16).replace("T", " ");
 			const move = eventMove(e);
+			// 版本号紧跟时刻：读的人要的是「这一行对应哪一版」，不是「谁做的」旁边多个读数
+			const rev = e.revision == null ? "" : `rev${e.revision} `;
 			const note = e.note ? `｜${short(e.note, 50)}` : "";
-			return `${when} ${e.actor} ${move}${note}`;
+			return `${when} ${rev}${e.actor} ${move}${note}`;
+		})
+		.join("\n");
+}
+
+/** 评论视图：新→旧，带版本、作者与时刻 */
+export function formatComments(comments: OrderComment[]): string {
+	if (!comments.length) return "还没有评论";
+	return comments
+		.map((c) => {
+			const when = c.at.slice(5, 16).replace("T", " ");
+			const rev = c.revision == null ? "" : ` rev${c.revision}`;
+			return `${when} ${c.actor}${rev}｜${c.body}`;
 		})
 		.join("\n");
 }

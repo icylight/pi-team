@@ -23,11 +23,14 @@ description: 用本机 SQLite 工单库记录多会话协作的状态——建�
 | --- | --- |
 | 建 | `orders_init` 建库（可同时写本轮需求）；`orders_create` 建单，正文写目标、交付物、边界、验收口径；`type` 可选，写类型给这条归个类 |
 | 改 | `orders_update` 改状态/下一步/终止依据/类型，范围修订直接用 `body` 覆盖（正文只留当前有效口径）；口径定了 `contentLock=true` 锁住内容；`orders_dep` 加删依赖 |
+| 评论 | `orders_comment` 留一段话：为什么这么判、看到什么、留给后面接手的人。不推状态、不涨 `rev`、不触发通知，写入后不改不删 |
 | 查 | `orders_list`（默认未收口；`ready` 只看能开工的；`next` 只看等某人的；`state` 看某个状态；`type` 看某个类型；回看历史加 `history=true`）、`orders_show`、`orders_requirement` |
 
 类型枚举默认 `需求单 · 实施单 · bug 单`，存在库的 `meta.types` 里：建库时用 `orders_init` 的 `types` 一次写定，之后改要直接写库。写枚举外的类型会被拒，不填就是未分类。
 
 库默认在 `<项目>/.work-orders/`，随项目走、不进 git。
+
+**版本号**：每写一次 `rev` 加一。列表、详情、每条动作都带它，动作记的是这次写完之后是第几版。跨会话说同一张单带上 rev（`T644 已取消（rev 6）`），对方一眼看出读的是不是同一版；`orders_update` 的 `expectedRevision` 用它拦并发。
 
 库版本不匹配会自动逐版升级。**多会话共享同一个库时，最省事的是升级前约好窗口**：各会话换到新版后由一个打开库完成迁移。
 被自动升级拖住过（还在跑旧代码的会话报「库版本比工具新」）时，临时设 `PI_WORK_ORDERS_NO_MIGRATE=1` 让它只报错不升级，

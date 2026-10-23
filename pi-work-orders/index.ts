@@ -24,7 +24,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { buildDigest, buildDispatchBrief, formatDispatchBrief, renderStale } from "./core/digest.ts";
-import { describeError, formatHistory, formatList, formatOrder, formatWaiting } from "./core/format.ts";
+import { describeError, formatComments, formatHistory, formatList, formatOrder, formatWaiting } from "./core/format.ts";
 import {
 	acknowledgeNotification,
 	claimNotification,
@@ -37,6 +37,8 @@ import {
 	reconcileNotifications,
 } from "./core/notifications.ts";
 import {
+	addComment,
+	commentsOf,
 	defaultDbPath,
 	eventsOf,
 	initLedger,
@@ -654,10 +656,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "orders_show",
 		label: "看工单",
-		description: "看一条工单的全文：正文、具名 md 内容入口、依赖、下游、终止依据、时间，以及最近几次动作。",
+		description: "看一条工单的全文：正文、具名 md 内容入口、依赖、下游、终止依据、时间、评论，以及最近几次动作。",
 		parameters: Type.Object({
 			id: Type.String({ description: "工单号，如 T01" }),
 			history: Type.Optional(Type.Number({ description: "带上最近几条动作记录，默认 5，最多 20" })),
+			comments: Type.Optional(Type.Number({ description: "带上最近几条评论，默认 5；传 0 不看" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			return run(() =>
@@ -665,11 +668,14 @@ export default function (pi: ExtensionAPI) {
 					const view = getOrder(db, params.id);
 					const limit = Math.min(20, Math.max(0, Math.floor(params.history ?? 5)));
 					const events = limit ? eventsOf(db, params.id, limit) : [];
+					const commentLimit = Math.max(0, Math.floor(params.comments ?? 5));
+					const comments = commentLimit ? commentsOf(db, params.id, commentLimit) : [];
 					// 派工要看的是现场：卡哪个前置、前置留下什么、能不能先占位、手上那份过期没
 					const brief = formatDispatchBrief(buildDispatchBrief(db, view));
 					return [
 						formatOrder(view, { deviation: deliveryDeviation(view) }),
 						brief ? `现场：\n${brief}` : "",
+						comments.length ? `评论：\n${formatComments(comments)}` : "",
 						events.length ? `最近动作：\n${formatHistory(events)}` : "",
 					]
 						.filter(Boolean)
@@ -879,6 +885,39 @@ export default function (pi: ExtensionAPI) {
 				return fail(error);
 			}
 			return finishMutation(mutation, me, ctx);
+		},
+	});
+
+	pi.registerTool({
+		name: "orders_comment",
+		label: "评论工单",
+		description:
+			"在工单上留一条评论：为什么这样判、看到什么、留给后面接手的人。评论与动作分开：不推状态、不涨 rev、不触发交接通知，也不进摘要；写入后不改不删。",
+		parameters: Type.Object({
+			id: Type.String({ description: "工单号" }),
+			body: Type.String({ description: "评论正文" }),
+			revision: Type.Optional(
+				Type.Number({ description: "针对哪一版：填你手上 orders_show 看到的 rev；只记录不校验" }),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			return run(() =>
+				withDb(ctx, (db) => {
+					const view = getOrder(db, params.id);
+					const comment = addComment(db, {
+						orderId: params.id,
+						actor: resolveActor(ctx),
+						body: params.body,
+						revision: params.revision ?? null,
+					});
+					// 版本对不上不当错误：评论本来就是停下来看一眼那条单的工具，指出差异比拒绝有用
+					const drift =
+						params.revision != null && params.revision !== view.revision
+							? `。注意：你指的是 rev${params.revision}，当前已是 rev${view.revision}`
+							: "";
+					return `${view.id} 评论 #${comment.id} 已记录（当前 rev${view.revision}）${drift}`;
+				}),
+			);
 		},
 	});
 

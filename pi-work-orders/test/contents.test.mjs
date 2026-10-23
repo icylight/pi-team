@@ -262,6 +262,8 @@ test("v3 升级仅加空入口，正文、状态、依赖、事件及版本号�
 	]) {
 		db.exec(`ALTER TABLE orders DROP COLUMN ${column};`);
 	}
+	db.exec("ALTER TABLE events DROP COLUMN revision;");
+	db.exec("DROP TABLE comments;");
 	db.exec("PRAGMA user_version=3;");
 	db.close();
 	assert.throws(() => openLedger(file, true), /只读/);
@@ -269,7 +271,13 @@ test("v3 升级仅加空入口，正文、状态、依赖、事件及版本号�
 	try {
 		assert.equal(reopened.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
 		assert.deepEqual(getOrder(reopened, down.id), down);
-		assert.deepEqual(eventsOf(reopened, down.id), history);
+		// 事件版本号是 v8 才加的列：升级前的旧事件没有它，其余字段原样不动
+		const stripRevision = (events) => events.map(({ revision: _, ...rest }) => rest);
+		assert.deepEqual(stripRevision(eventsOf(reopened, down.id)), stripRevision(history));
+		assert.ok(
+			eventsOf(reopened, down.id).every((e) => e.revision === null),
+			"旧事件不编一个版本号出来",
+		);
 	} finally {
 		reopened.close();
 	}

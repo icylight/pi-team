@@ -15,13 +15,14 @@ import {
 	type EventKind,
 	LedgerError,
 	type Meta,
+	type OrderComment,
 	type OrderEvent,
 	type Requirement,
 	type StateDef,
 	type TerminalKind,
 } from "./types.ts";
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 export const DEFAULT_DB_DIR = ".work-orders";
 export const DEFAULT_DB_NAME = "work-orders.sqlite";
 
@@ -70,12 +71,23 @@ CREATE TABLE events (
   from_state TEXT,
   to_state   TEXT,
   note       TEXT NOT NULL DEFAULT '',
+  at         TEXT NOT NULL,
+  revision   INTEGER
+);
+
+CREATE TABLE comments (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id   TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  actor      TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  revision   INTEGER,
   at         TEXT NOT NULL
 );
 
-CREATE INDEX orders_state  ON orders(state);
-CREATE INDEX deps_reverse  ON deps(depends_on);
-CREATE INDEX events_order  ON events(order_id, id);
+CREATE INDEX orders_state   ON orders(state);
+CREATE INDEX deps_reverse   ON deps(depends_on);
+CREATE INDEX events_order   ON events(order_id, id);
+CREATE INDEX comments_order ON comments(order_id, id);
 `;
 
 /**
@@ -83,6 +95,18 @@ CREATE INDEX events_order  ON events(order_id, id);
  * 只加表、加列，不重建：旧库里已有的数据不动。
  */
 const MIGRATIONS: Record<number, string> = {
+	7: `
+ALTER TABLE events ADD COLUMN revision INTEGER;
+CREATE TABLE comments (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id   TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  actor      TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  revision   INTEGER,
+  at         TEXT NOT NULL
+);
+CREATE INDEX comments_order ON comments(order_id, id);
+`,
 	6: `
 ALTER TABLE orders ADD COLUMN content_lock TEXT
   CHECK (content_lock IS NULL OR (json_valid(content_lock) AND json_type(content_lock) = 'object'));
@@ -378,7 +402,13 @@ export interface NewEvent {
 
 /** 记一次动作。写路径上调用，与业务写同一次事务 */
 export function logEvent(db: DatabaseSync, event: NewEvent): void {
-	db.prepare("INSERT INTO events(order_id,actor,kind,from_state,to_state,note,at) VALUES(?,?,?,?,?,?,?)").run(
+	// 事件记的是这次写之后的版本：读的人拿工单的 rev 对照，能直接定位到是哪次动作把它推到这一版
+	const row = db.prepare("SELECT revision FROM orders WHERE id=?").get(event.orderId) as
+		| { revision?: number }
+		| undefined;
+	db.prepare(
+		"INSERT INTO events(order_id,actor,kind,from_state,to_state,note,at,revision) VALUES(?,?,?,?,?,?,?,?)",
+	).run(
 		event.orderId,
 		event.actor,
 		event.kind,
@@ -386,6 +416,7 @@ export function logEvent(db: DatabaseSync, event: NewEvent): void {
 		event.toState ?? null,
 		event.note ?? "",
 		now(),
+		row?.revision == null ? null : Number(row.revision),
 	);
 }
 
@@ -399,6 +430,7 @@ function toEvent(row: Record<string, unknown>): OrderEvent {
 		toState: row.to_state == null ? null : String(row.to_state),
 		note: String(row.note ?? ""),
 		at: String(row.at),
+		revision: row.revision == null ? null : Number(row.revision),
 	};
 }
 
@@ -416,4 +448,58 @@ export function enteredStateAt(db: DatabaseSync, orderId: string, state: string)
 		.prepare("SELECT at FROM events WHERE order_id=? AND to_state=? ORDER BY id DESC LIMIT 1")
 		.get(orderId, state) as Record<string, unknown> | undefined;
 	return row ? String(row.at) : undefined;
+}
+
+// ── 评论：与动作分开，只追加 ─────────────────────────
+
+/**
+ * 评论是给人看的话，不是动作：不推状态、不涨 revision、不触发交接通知。
+ * 动作回答「这单怎么变的」，评论回答「为什么、怎么看」。
+ */
+export interface NewComment {
+	orderId: string;
+	actor: string;
+	body: string;
+	/** 针对哪一版：调用方手上看到的 rev；不校验不拒绝，只用来事后对账 */
+	revision?: number | null;
+}
+
+export function addComment(db: DatabaseSync, input: NewComment): OrderComment {
+	const body = input.body.trim();
+	if (!body) throw new LedgerError("评论内容不能为空");
+	// 先查单号：外键报的是 SQLITE_CONSTRAINT，读的人看不出是“单号写错”还是“库坏了”
+	if (!db.prepare("SELECT 1 FROM orders WHERE id=?").get(input.orderId)) {
+		throw new LedgerError(`没有这条工单：${input.orderId}`);
+	}
+	const at = now();
+	const result = db
+		.prepare("INSERT INTO comments(order_id,actor,body,revision,at) VALUES(?,?,?,?,?)")
+		.run(input.orderId, input.actor, body, input.revision ?? null, at);
+	return {
+		id: Number(result.lastInsertRowid),
+		orderId: input.orderId,
+		actor: input.actor,
+		body,
+		revision: input.revision ?? null,
+		at,
+	};
+}
+
+function toComment(row: Record<string, unknown>): OrderComment {
+	return {
+		id: Number(row.id),
+		orderId: String(row.order_id),
+		actor: String(row.actor),
+		body: String(row.body),
+		revision: row.revision == null ? null : Number(row.revision),
+		at: String(row.at),
+	};
+}
+
+/** 一条单的评论，新→旧 */
+export function commentsOf(db: DatabaseSync, orderId: string, limit = 20): OrderComment[] {
+	const rows = db
+		.prepare("SELECT * FROM comments WHERE order_id=? ORDER BY id DESC LIMIT ?")
+		.all(orderId, limit) as Record<string, unknown>[];
+	return rows.map(toComment);
 }
