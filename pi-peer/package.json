@@ -1,37 +1,38 @@
 {
-  "name": "pi-peer",
-  "version": "1.0.0",
-  "description": "同目录多 pi 会话互通 —— 文件邮箱 + 心跳发现，零依赖、无守护进程",
-  "type": "module",
-  "keywords": [
-    "pi-package",
-    "pi-extension",
-    "peer",
-    "multi-agent",
-    "messaging"
-  ],
-  "license": "MIT",
-  "files": [
-    "index.ts",
-    "store.ts",
-    "config.ts",
-    "skills",
-    "README.md"
-  ],
-  "pi": {
-    "extensions": [
-      "./index.ts"
-    ],
-    "skills": [
-      "./skills"
-    ]
-  },
-  "scripts": {
-    "test": "node --test test/*.test.ts"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
-  }
+	"name": "pi-peer",
+	"version": "1.0.0",
+	"description": "同目录多 pi 会话互通 —— 文件邮箱 + 心跳发现，零依赖、无守护进程",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"peer",
+		"multi-agent",
+		"messaging"
+	],
+	"license": "MIT",
+	"files": [
+		"index.ts",
+		"store.ts",
+		"activity.ts",
+		"config.ts",
+		"skills",
+		"README.md"
+	],
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		],
+		"skills": [
+			"./skills"
+		]
+	},
+	"scripts": {
+		"test": "node --test test/*.test.ts"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	}
 }

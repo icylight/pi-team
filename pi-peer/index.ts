@@ -6,7 +6,9 @@
  * 机制：
  * - 每个会话启动时把自己注册到 ~/.pi/peers/<cwdKey>/members/，并持续心跳
  * - 发消息 = 往对方的 pending/ 目录原子写一个 JSON
- * - 收消息 = fs.watch 监听自己的 pending/（2s 轮询兜底），取走后注入会话并唤醒对方
+ * - 收消息 = fs.watch 监听自己的 pending/（2s 轮询兜底），取走后注入会话并唤醒对方；
+ *   自己正跑一轮时普通消息不取，留在 pending/ 并提示一句，这一轮结束后补投
+ *   （会话也可以用 peer_fetch 提前取走，取走的不再自动注入）
  * - 跨项目：按「项目标签/名字」寻址，投递写的是对方的桶；接收方不用升级也能收
  *
  * 与其他方案的区别：不依赖 tmux、不起 broker 进程、无网络、无第三方依赖。
@@ -23,7 +25,7 @@
  * 角色会话：领取角色时把角色卡与项目流程注入 system prompt，消息按具体实例名寻址。
  * 重启会话会沿用会话里记录的角色（含中途切换与取消）。
  *
- * 工具：peer_list / peer_send / peer_inbox
+ * 工具：peer_list / peer_send / peer_inbox / peer_fetch
  *
  * 关闭：项目内 <cwd>/.pi/peer.json 写 {"enabled": false}；或进程级环境变量 PI_PEER_OFF=1
  */
@@ -40,6 +42,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { readActivity, switchAdvice } from "./activity.ts";
 import {
 	CONFIG_FILE,
 	configWarnings,
@@ -79,6 +82,8 @@ const LEGACY_PEER_TYPE = "peer";
 const HEARTBEAT_MS = 5_000;
 const POLL_MS = 2_000;
 const DRAIN_DEBOUNCE_MS = 50;
+/** peer_fetch 一次最多取几条：够看清手上的信，又不至于一下把收件箱掏空 */
+const MAX_FETCH = 10;
 /** 会话条目类型：记录本会话领取的角色，重启后据此恢复 */
 const ROLE_ENTRY = "peer-role";
 const ROLE_DEFAULTS_ENTRY = "peer-role-defaults";
@@ -104,6 +109,8 @@ let pollTimer: NodeJS.Timeout | undefined;
 let drainTimer: NodeJS.Timeout | undefined;
 let watcher: fs.FSWatcher | undefined;
 let draining = false;
+/** 已经提示过「有信等着」的消息 id：轮询每轮都会重看收件箱，不去重就反复弹同一条 */
+const announcedWaiting = new Set<string>();
 let roleCard: string | undefined;
 let flowDocument: string | undefined;
 let handleSessionControl: ((message: PeerMessage) => Promise<void>) | undefined;
@@ -619,6 +626,8 @@ export default function (pi: ExtensionAPI) {
 		}
 		// 排队中的角色分配在这里生效：这一轮已收尾，没有工具调用在跑
 		void applyQueuedRole();
+		// 忙时留在收件箱的消息在这一轮结束后投进来，不必等下一次轮询
+		scheduleDrain();
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -755,6 +764,7 @@ export default function (pi: ExtensionAPI) {
 			"用 peer_list 查看当前文件夹下的 pi 会话（第一行是自己）；用 peer_send 给其他会话发消息（对方会被唤醒并看到正文）。",
 			'peer_list 传 scope="all" 看其他项目的会话；发消息时写「项目/名字」当目标。',
 			"收到 [peer …] 消息后只在确实需要回答或行动时才回复；对方只是通报进度或结论时不要回确认，避免两个会话互相刷屏。",
+			"自己在忙时收到的普通消息会留在收件箱，只弹一句提示；要提前看内容用 peer_fetch 取，取走的不再自动注入。",
 		],
 		parameters: Type.Object({
 			all: Type.Optional(Type.Boolean({ description: "包含已离线成员（默认只列在线的）" })),
@@ -774,8 +784,10 @@ export default function (pi: ExtensionAPI) {
 			const own = ownAll.filter((s) => s.member.key !== self!.key);
 			const foreign = (scan ?? []).filter((s) => s.bucket !== store!.dir && s.member.key !== self!.key);
 
-			// 「在忙」只是提示：手动发消息照样能发，会自动插到对方当前这轮之后
-			const render = (m: Member, live: boolean, label: string, isSelf = false) => {
+			// 「在忙」只是提示：手动发消息照样能发，对方在忙时留到这一轮结束再投
+			// 在忙的会话额外给出「它当前在做什么」：读对方 transcript 尾部，区分「在跑命令」与「真的没动静」。
+			// 切换角色前看这一行，不必再去猜它是不是卡在某条命令上。
+			const render = (m: Member, live: boolean, label: string, isSelf = false, withActivity = false) => {
 				const age = Math.round((Date.now() - m.lastSeen) / 1000);
 				const tag = isSelf
 					? m.hidden
@@ -788,16 +800,20 @@ export default function (pi: ExtensionAPI) {
 						: "";
 				// 待切：已受理、等这一轮结束后才生效的角色分配，派工方看到就别把它当已切换
 				const pending = m.pendingRole ? `·待切 ${m.pendingRole.role}` : "";
-				return (
+				const head =
 					`- ${label}${tag}｜${m.model}｜${live ? (isBusy(m) ? "在线·在忙" : "在线·空闲") : "离线"}${live ? pending : ""}` +
-					`｜id=${m.key}｜pid=${m.pid}｜${age}s 前心跳`
-				);
+					`｜id=${m.key}｜pid=${m.pid}｜${age}s 前心跳`;
+				if (!live || isSelf || !withActivity) return head;
+				const activity = readActivity(m.sessionFile);
+				if (activity.kind === "unknown") return head;
+				return `${head}\n    └ ${activity.summary}`;
 			};
 
 			// 自己排第一：要跟别人说话，先得知道自己在这套寻址里叫什么
+			// 别人的「当前动作」放在心跳行下面，只在本地范围里给（跨项目会话不必替它读文件）
 			const lines = [
 				...(me ? [render(me.member, true, me.member.name, true)] : []),
-				...own.map((s) => render(s.member, s.live, s.member.name)),
+				...own.map((s) => render(s.member, s.live, s.member.name, false, true)),
 				...foreign.map((s) => render(s.member, s.live, `${s.project}/${s.member.name}`)),
 			];
 			if (own.length === 0 && foreign.length === 0) {
@@ -847,7 +863,7 @@ export default function (pi: ExtensionAPI) {
 			ctx?.ui.notify(`→ ${res.member.name}: ${firstLine(msg.text)}`, "info");
 
 			return text(
-				`已写入 ${res.member.name} 的收件箱｜id=${msg.id}｜${priority === "urgent" ? "urgent / steer，允许打断" : "normal / followUp，不打断当前轮"}；写入收件箱不代表已处理`,
+				`已写入 ${res.member.name} 的收件箱｜id=${msg.id}｜${priority === "urgent" ? "urgent / steer，允许打断" : "normal / 空闲时立刻唤醒，对方在忙则留在收件箱等这一轮结束"}；写入收件箱不代表已处理`,
 			);
 		},
 	});
@@ -881,6 +897,17 @@ export default function (pi: ExtensionAPI) {
 				throw new Error("只能给同项目的其他会话分配角色");
 			if (target.member.roleAssignmentVersion !== 1) throw new Error("目标版本不支持角色分配，请先重载目标扩展");
 			if (signal?.aborted) throw new Error("已取消，未发送请求");
+			// 切之前先看它当前在干什么。这只是一句话，不阻止调用：
+			// 是否打断仍由调用方定，但它得知道自己刚打断的是什么。
+			const activity = readActivity(target.member.sessionFile);
+			const advice = switchAdvice(activity);
+			const busyNow = isBusy(target.member);
+			const interrupting = busyNow && params.interrupt !== false;
+			const interruptionNote = interrupting
+				? activity.kind === "unknown"
+					? "｜目标在忙，读不到它当前在跑什么，已按打断处理"
+					: `｜已打断它当前的工作：${activity.summary}${advice.safeToSwitch ? "" : "；这类中断有代价，下次先问它能不能停"}`
+				: "";
 			return new Promise<ReturnType<typeof text>>((resolve, reject) => {
 				const requestId = sendControl(target.member, {
 					kind: "assign-role",
@@ -903,8 +930,8 @@ export default function (pi: ExtensionAPI) {
 						resolve(
 							text(
 								state === "queued"
-									? `${detail}｜受理不等于已切换，peer_list 里标着「待切」；执行后会在本会话提示`
-									: detail,
+									? `${detail}｜受理不等于已切换，peer_list 里标着「待切」；执行后会在本会话提示${interruptionNote}`
+									: `${detail}${interruptionNote}`,
 							),
 						);
 					else reject(new Error(detail));
@@ -956,6 +983,40 @@ export default function (pi: ExtensionAPI) {
 				return `[${clockTime(m.ts)}] ${m.fromName}（${ago}s 前）id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
 			});
 			return text(lines.join("\n"));
+		},
+	});
+
+	pi.registerTool({
+		name: "peer_fetch",
+		label: "Peer Fetch",
+		description:
+			"主动取走收件箱里等着投递的 peer 消息：直接拿到正文，取走的不会再自动注入一遍。忙时收到「有信等着」的提示后用它提前看。",
+		promptSnippet: "主动取走收件箱里等待投递的消息",
+		parameters: Type.Object({
+			limit: Type.Optional(Type.Number({ description: "最多取几条，默认 5" })),
+		}),
+		async execute(_toolCallId, params) {
+			if (!store || !self) return text("pi-peer 未启用（未注册成功）");
+			const limit = Math.min(MAX_FETCH, Math.max(1, Math.floor(params.limit ?? 5)));
+			const waiting = store.peekPending(self.key).filter(isWaitingNormal);
+			if (waiting.length === 0) {
+				return text("收件箱里没有等着投递的消息。交接、控制消息与紧急消息不走这条路径，它们会直接送达。");
+			}
+			const taken = store.takePending(
+				self.key,
+				waiting.slice(0, limit).map((m) => m.id),
+			);
+			for (const msg of taken) announcedWaiting.delete(msg.id);
+			if (taken.length === 0) return text("这几条在取出前已经被自动投递了，按会话里的注入处理。");
+			const lines = taken.map((m) => {
+				const ago = Math.round((Date.now() - m.ts) / 1000);
+				return `[${clockTime(m.ts)}] ${m.fromName}（${ago}s 前）id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
+			});
+			const rest = store.peekPending(self.key).filter(isWaitingNormal);
+			const tail = rest.length
+				? `\n\n收件箱还有 ${[...new Set(rest.map((m) => m.fromName))].join("、")} 的消息没取，需要就再调一次 peer_fetch。`
+				: "";
+			return text(`已取走（不会再自动注入）：\n${lines.join("\n")}${tail}`);
 		},
 	});
 
@@ -1620,6 +1681,33 @@ function scheduleDrain(): void {
 	drainTimer.unref?.();
 }
 
+/** 自己在跑一轮：刚发的消息不该插进正在进行的步骤里 */
+function selfBusy(): boolean {
+	return (self?.busy ?? false) || ctxRef?.isIdle?.() === false;
+}
+
+/**
+ * 能留在收件箱里等的普通消息。
+ *
+ * 交接要按台账阶段校验、控制消息要立刻执行、urgent 是要插队的，
+ * 这三类都不进待取窗口，照原路径走。
+ */
+function isWaitingNormal(msg: PeerMessage): boolean {
+	return !msg.handoff && !msg.control && msg.priority !== "urgent";
+}
+
+/** 忙时提示一次「有信等着」；正文等这一轮结束再投，想提前看用 peer_fetch */
+function announceWaiting(waiting: PeerMessage[]): void {
+	const ids = new Set(waiting.map((m) => m.id));
+	for (const seen of announcedWaiting) if (!ids.has(seen)) announcedWaiting.delete(seen);
+	const fresh = waiting.filter((m) => !announcedWaiting.has(m.id));
+	if (fresh.length === 0) return;
+	for (const m of fresh) announcedWaiting.add(m.id);
+	const first = fresh[0] as PeerMessage;
+	const senders = [...new Set(waiting.map((m) => m.fromName))].join("、");
+	ctxRef?.ui.notify(`← ${senders}：${firstLine(first.text)}（在忙，这一轮结束后送达；要提前看用 peer_fetch）`, "info");
+}
+
 async function drainAndDeliver(): Promise<void> {
 	// 专注期间不取收件箱：消息留在 pending，退出后再投；也不唤醒本轮
 	if (focused || draining || !store || !self) return;
@@ -1627,6 +1715,14 @@ async function drainAndDeliver(): Promise<void> {
 	const activeStore = store;
 	const activeMember = self;
 	try {
+		if (selfBusy()) {
+			// 在忙：普通消息不取，留在收件箱等这一轮结束；先提示一句让人知道有信
+			const waiting = activeStore.peekPending(activeMember.key);
+			const deferred = waiting.filter(isWaitingNormal);
+			announceWaiting(deferred);
+			// 全是普通消息就不进 drain，免得每轮 rename 一次又放回去
+			if (deferred.length === waiting.length) return;
+		}
 		for (const msg of activeStore.drain(activeMember.key)) {
 			if (store !== activeStore || self !== activeMember) break;
 			if (msg.control) {
@@ -1634,7 +1730,7 @@ async function drainAndDeliver(): Promise<void> {
 				await handleControl?.(msg);
 			} else if (msg.handoff) {
 				const persisted = diskHasHandoff(msg.handoff.id);
-				if (self.busy || ctxRef?.isIdle?.() === false) {
+				if (selfBusy()) {
 					// 忙就放回去等下一轮：drain 已把它 rename 进 delivered，
 					// 直接 continue 等于「既没送到、又不在收件箱」，而台账那边看不到确认，
 					// 过 15s 换新 lease 再投一次——实测同一份交接这样重复了 52 次。
@@ -1650,6 +1746,9 @@ async function drainAndDeliver(): Promise<void> {
 						else if (!deliver(msg)) throw new Error("会话注入失败");
 					},
 				});
+			} else if (selfBusy() && isWaitingNormal(msg)) {
+				// 上面那批里混了普通消息（同批还有 urgent）：放回去等这一轮结束
+				activeStore.requeue(activeMember.key, msg);
 			} else deliver(msg);
 		}
 	} catch (err) {
@@ -1768,6 +1867,7 @@ const renderPeerMessage: MessageRenderer = (message, options, theme) => {
 
 function deliver(msg: PeerMessage): boolean {
 	if (!api) return false;
+	announcedWaiting.delete(msg.id);
 
 	// 首行给模型认来源（custom 消息转成 LLM 输入时是普通 user 文本，没有额外标记）；
 	// 长度压到一行，免得 session tree 里正文被元信息挤掉。

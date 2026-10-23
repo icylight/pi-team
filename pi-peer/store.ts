@@ -832,6 +832,64 @@ export class PeerStore {
 	}
 
 	/**
+	 * 收件箱快照：只读，不 rename。
+	 *
+	 * 用来「先看有哪几条等着」：在忙时只提示不取，避免消息一进 delivered
+	 * 就既没送到、又不在收件箱里。真正取走仍走 drain 或 takePending。
+	 */
+	peekPending(key: string): PeerMessage[] {
+		const dir = this.pendingDir(key);
+		let files: string[];
+		try {
+			files = fs
+				.readdirSync(dir)
+				.filter((f) => f.endsWith(".json"))
+				.sort();
+		} catch {
+			return [];
+		}
+		const out: PeerMessage[] = [];
+		for (const f of files.slice(0, MAX_BATCH)) {
+			const msg = readJson<PeerMessage>(path.join(dir, f));
+			if (msg && typeof msg.text === "string" && typeof msg.from === "string") out.push(msg);
+		}
+		return out;
+	}
+
+	/**
+	 * 按 id 取走点名的那几条（同样先 rename 进 delivered）。
+	 *
+	 * 与 drain 的区别是只取点名的，其余留在收件箱。用于会话主动取信：
+	 * 取走的进会话、不再自动注入，剩下的照常等空闲时投递。
+	 */
+	takePending(key: string, ids: readonly string[]): PeerMessage[] {
+		if (ids.length === 0) return [];
+		const wanted = new Set(ids);
+		const dir = this.pendingDir(key);
+		let files: string[];
+		try {
+			files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+		} catch {
+			return [];
+		}
+		const delivered = this.deliveredDir(key);
+		fs.mkdirSync(delivered, { recursive: true, mode: DIR_MODE });
+		const out: PeerMessage[] = [];
+		for (const f of files) {
+			const from = path.join(dir, f);
+			const msg = readJson<PeerMessage>(from);
+			if (!msg || !wanted.has(msg.id)) continue;
+			try {
+				fs.renameSync(from, path.join(delivered, f));
+			} catch {
+				continue;
+			}
+			out.push(msg);
+		}
+		return out;
+	}
+
+	/**
 	 * 收件箱里是否已有同一份交接。
 	 *
 	 * 台账那边按 15 秒租约重投，每次会写一条新消息；目标在忙时这些消息都堆在 pending 里
