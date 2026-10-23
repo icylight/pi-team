@@ -7,8 +7,9 @@
  * - 每个会话启动时把自己注册到 ~/.pi/peers/<cwdKey>/members/，并持续心跳
  * - 发消息 = 往对方的 pending/ 目录原子写一个 JSON
  * - 收消息 = fs.watch 监听自己的 pending/（2s 轮询兜底），取走后注入会话并唤醒对方；
- *   自己正跑一轮时普通消息不取，留在 pending/ 并提示一句，这一轮结束后补投
- *   （会话也可以用 peer_fetch 提前取走，取走的不再自动注入）
+ *   按对话成组取（同一 thread 不拆到两批，一批在 MAX_BATCH 处退到对话边界），
+ *   注入正文首行带发送时刻；自己正跑一轮时普通消息不取，留在 pending/ 并提示一句，
+ *   这一轮结束后补投（会话也可以用 peer_fetch 提前取走，取走的不再自动注入）
  * - 跨项目：按「项目标签/名字」寻址，投递写的是对方的桶；接收方不用升级也能收
  *
  * 与其他方案的区别：不依赖 tmux、不起 broker 进程、无网络、无第三方依赖。
@@ -979,8 +980,7 @@ export default function (pi: ExtensionAPI) {
 				.slice(0, limit);
 			if (items.length === 0) return text("还没有收到过 peer 消息（给定的时间范围内也没有）。");
 			const lines = items.map((m) => {
-				const ago = Math.round((Date.now() - m.ts) / 1000);
-				return `[${clockTime(m.ts)}] ${m.fromName}（${ago}s 前）id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
+				return `[${messageStamp(m.ts)}｜${relativeAge(m.ts)}] ${m.fromName} id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
 			});
 			return text(lines.join("\n"));
 		},
@@ -1009,8 +1009,7 @@ export default function (pi: ExtensionAPI) {
 			for (const msg of taken) announcedWaiting.delete(msg.id);
 			if (taken.length === 0) return text("这几条在取出前已经被自动投递了，按会话里的注入处理。");
 			const lines = taken.map((m) => {
-				const ago = Math.round((Date.now() - m.ts) / 1000);
-				return `[${clockTime(m.ts)}] ${m.fromName}（${ago}s 前）id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
+				return `[${messageStamp(m.ts)}｜${relativeAge(m.ts)}] ${m.fromName} id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
 			});
 			const rest = store.peekPending(self.key).filter(isWaitingNormal);
 			const tail = rest.length
@@ -1512,10 +1511,27 @@ function parseInboxTime(raw: string | undefined): number | null {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
-function clockTime(ts: number): string {
+/** 消息时刻：同日只写 HH:MM，跨日补 MM-DD，跨年再补年；正文、列表、提示共用一套 */
+export function messageStamp(ts: number): string {
 	const d = new Date(ts);
-	const p = (n: number) => String(n).padStart(2, "0");
-	return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+	const pad = (n: number) => String(n).padStart(2, "0");
+	const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+	const now = new Date();
+	if (d.getFullYear() !== now.getFullYear())
+		return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
+	if (d.toDateString() !== now.toDateString()) return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
+	return time;
+}
+
+/** 多久以前：一分钟内说秒，一天内说分钟或小时，更早的天数 */
+export function relativeAge(ts: number): string {
+	const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
+	if (seconds < 60) return `${seconds} 秒前`;
+	const minutes = Math.round(seconds / 60);
+	if (minutes < 60) return `${minutes} 分钟前`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 24) return `${hours} 小时前`;
+	return `${Math.round(hours / 24)} 天前`;
 }
 
 function isValidRoleName(role: string): boolean {
@@ -1705,7 +1721,10 @@ function announceWaiting(waiting: PeerMessage[]): void {
 	for (const m of fresh) announcedWaiting.add(m.id);
 	const first = fresh[0] as PeerMessage;
 	const senders = [...new Set(waiting.map((m) => m.fromName))].join("、");
-	ctxRef?.ui.notify(`← ${senders}：${firstLine(first.text)}（在忙，这一轮结束后送达；要提前看用 peer_fetch）`, "info");
+	ctxRef?.ui.notify(
+		`← ${senders}：${firstLine(first.text)}（${messageStamp(first.ts)} 收，在忙，这一轮结束后送达；要提前看用 peer_fetch）`,
+		"info",
+	);
 }
 
 async function drainAndDeliver(): Promise<void> {
@@ -1872,7 +1891,7 @@ function deliver(msg: PeerMessage): boolean {
 	// 首行给模型认来源（custom 消息转成 LLM 输入时是普通 user 文本，没有额外标记）；
 	// 长度压到一行，免得 session tree 里正文被元信息挤掉。
 	const body = [
-		`[peer ${msg.fromName}]`,
+		`[peer ${msg.fromName}｜${messageStamp(msg.ts)}]`,
 		"",
 		msg.text,
 		"",

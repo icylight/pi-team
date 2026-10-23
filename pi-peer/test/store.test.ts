@@ -11,6 +11,7 @@ import {
 	BUSY_STALE_MS,
 	cwdKey,
 	isBusy,
+	MAX_BATCH,
 	MAX_TEXT,
 	newMessageId,
 	newSessionKey,
@@ -77,8 +78,7 @@ function crossPair(): { a: PeerStore; b: PeerStore; cwdA: string } {
 	return { a: new PeerStore(shared, cwdA), b: new PeerStore(shared, cwdB), cwdA };
 }
 
-function msg(from: string, fromName: string, to: string, text: string) {
-	const ts = Date.now();
+function msg(from: string, fromName: string, to: string, text: string, ts = Date.now(), thread?: string) {
 	return {
 		id: newMessageId(),
 		from,
@@ -86,7 +86,7 @@ function msg(from: string, fromName: string, to: string, text: string) {
 		to,
 		text,
 		ts,
-		thread: undefined as string | undefined,
+		thread,
 		replyTo: undefined as string | undefined,
 	};
 }
@@ -352,7 +352,7 @@ describe("消息投递", () => {
 		assert.equal(store.drain(a.key).length, 0, "发件人收件箱应为空");
 	});
 
-	it("先搬走再读：连续 drain 不会重复投递", () => {
+	it("先读后 rename：连续 drain 不会重复投递", () => {
 		const store = freshStore();
 		const a = member(store, "7100-1111", "s2");
 		const b = member(store, "7101-2222", "r2");
@@ -399,7 +399,56 @@ describe("消息投递", () => {
 
 	it("非法 key 不会写出目录之外", () => {
 		const store = freshStore();
-		assert.throws(() => store.send(msg("a", "a", "../../etc", "x", 0)));
+		assert.throws(() => store.send(msg("a", "a", "../../etc", "x")));
+	});
+});
+
+describe("收件箱按对话成组", () => {
+	it("两个对方的对话各自成段，不交错铺开", () => {
+		const store = freshStore();
+		const a = member(store, "7500-1111", "甲");
+		const b = member(store, "7501-2222", "乙");
+		const base = Date.now();
+
+		store.send(msg(a.key, a.name, b.key, "甲1", base, "thread-a"));
+		store.send(msg(a.key, a.name, b.key, "乙1", base + 1, "thread-b"));
+		store.send(msg(a.key, a.name, b.key, "甲2", base + 2, "thread-a"));
+		store.send(msg(a.key, a.name, b.key, "乙2", base + 3, "thread-b"));
+
+		assert.deepEqual(
+			store.drain(b.key).map((m) => m.text),
+			["甲1", "甲2", "乙1", "乙2"],
+		);
+	});
+
+	it("一批装满时退到对话边界，同一段对话不拆到两批", () => {
+		const store = freshStore();
+		const a = member(store, "7600-1111", "甲");
+		const b = member(store, "7601-2222", "乙");
+		const base = Date.now();
+
+		for (let i = 0; i < 15; i++) store.send(msg(a.key, a.name, b.key, `甲${i}`, base + i, "thread-a"));
+		for (let i = 0; i < 10; i++) store.send(msg(a.key, a.name, b.key, `乙${i}`, base + 100 + i, "thread-b"));
+
+		const first = store.drain(b.key);
+		assert.equal(first.length, 15, "第一批装到甲的对话结束为止，乙不挤进来");
+		assert.deepEqual(
+			first.map((m) => m.thread),
+			Array.from({ length: 15 }, () => "thread-a"),
+		);
+		assert.equal(store.drain(b.key).length, 10, "剩下的下一批整段投出");
+	});
+
+	it("同一段对话本身就超过一批时按上限硬切，否则永远投不出去", () => {
+		const store = freshStore();
+		const a = member(store, "7700-1111", "甲");
+		const b = member(store, "7701-2222", "乙");
+		const base = Date.now();
+
+		for (let i = 0; i < 25; i++) store.send(msg(a.key, a.name, b.key, `第${i}条`, base + i, "thread-alone"));
+
+		assert.equal(store.drain(b.key).length, MAX_BATCH);
+		assert.equal(store.drain(b.key).length, 25 - MAX_BATCH);
 	});
 });
 

@@ -120,7 +120,7 @@ test("收到消息：类型名用来源名，标注行压到一行", async () =>
 		await new Promise((resolve) => setTimeout(resolve, 2500));
 		assert.equal(peer.sent.length, 1);
 		assert.equal(peer.sent[0].message.customType, "dev", "tree 与气泡都拿类型名当来源标签");
-		assert.match(String(peer.sent[0].message.content), /^\[peer dev\]\n\nT188 已由 qa 收口/);
+		assert.match(String(peer.sent[0].message.content), /^\[peer dev｜\d{2}:\d{2}\]\n\nT188 已由 qa 收口/);
 		assert.ok(peer.renderers.has("dev"), "来源类型要当场注册，否则气泡落到默认样式");
 	} finally {
 		peer.restore();

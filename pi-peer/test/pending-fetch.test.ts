@@ -116,6 +116,7 @@ test("peer_fetch 取走后正文直接给到模型，本轮结束不再注入", 
 		const body = String(res.content[0].text);
 		assert.match(body, /交接前先把 T01 关掉/);
 		assert.match(body, new RegExp(`id=${id}`));
+		assert.match(body, /\[\d{2}:\d{2}｜\d+ 秒前\]/, "取走时要能看到这条是什么时候发的");
 		assert.equal(pendingCount(h.root, h.cwd), 0, "取过的离开收件箱");
 
 		h.handlers.get("agent_end")!({});
@@ -139,6 +140,7 @@ test("不取也照常送达：这一轮结束后自动注入", async () => {
 		await delay(400);
 		assert.equal(h.injected.length, 1, "忙完补投");
 		assert.match(h.injected[0]!, /忙完回我一句/);
+		assert.match(h.injected[0]!, /^\[peer [^\]]+｜\d{2}:\d{2}\]/, "注入正文首行带发送时刻");
 		assert.equal(pendingCount(h.root, h.cwd), 0);
 	} finally {
 		h.handlers.get("session_shutdown")?.();

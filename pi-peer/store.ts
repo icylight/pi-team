@@ -11,7 +11,7 @@
  *
  * 设计要点：
  * - 原子写：先写临时文件再 rename，避免读到半截 JSON
- * - 先搬再读：投递时先把文件 rename 到 delivered，杜绝重复投递
+ * - 先读后搬：投递时先读正文再把文件 rename 到 delivered，杜绝重复投递；按对话成组，同一 thread 不拆到两批
  * - 无守护进程：每个会话只写自己的收件箱和注册表，崩溃自愈靠 pid + lastSeen
  *
  * AI(TAG): [跨项目寻址与投递] 桶是唯一真相：跨项目发现靠扫 root 下所有桶，投递写目标的桶。
@@ -30,7 +30,7 @@ const DIR_MODE = 0o700;
 export const STALE_MS = 30_000;
 /** 单条消息正文上限（字符） */
 export const MAX_TEXT = 32_000;
-/** 单次投递最多处理的消息数，避免积压时一次性灌爆上下文 */
+/** 单次投递最多处理的消息数，避免积压时一次性灌爆上下文；截断落在对话边界上 */
 export const MAX_BATCH = 20;
 /** delivered 目录保留条数 */
 export const HISTORY_KEEP = 200;
@@ -197,6 +197,45 @@ export function newSessionKey(pid = process.pid, stableSeed?: string): string {
 		? createHash("sha256").update(stableSeed).digest("hex").slice(0, 4)
 		: randomBytes(2).toString("hex");
 	return `${pid}-${suffix}`;
+}
+
+/** 收件箱条目：文件名带投递时间戳，用于定序 */
+interface PendingEntry {
+	file: string;
+	msg: PeerMessage;
+}
+
+function threadKeyOf(msg: PeerMessage): string {
+	return msg.thread ?? msg.id;
+}
+
+/**
+ * 收件箱按对话成组排序。
+ *
+ * 收件箱按发送时刻命名，直接顺序投递会让两个对方的对话交错铺开，模型要看半天才知道哪句接哪句。
+ * 同一 thread 的消息连成一段，段与段之间保持首条的时间先后；没有 thread 的消息自成一段。
+ */
+function groupByThread(entries: PendingEntry[]): PendingEntry[] {
+	const groups = new Map<string, PendingEntry[]>();
+	for (const entry of entries) {
+		const key = threadKeyOf(entry.msg);
+		const group = groups.get(key);
+		if (group) group.push(entry);
+		else groups.set(key, [entry]);
+	}
+	return [...groups.values()].flat();
+}
+
+/**
+ * 一批能装几条：截断退到对话边界，避免同一段对话被拆到两批。
+ *
+ * 第一段本身就超过上限时按上限硬切，否则永远发不出去。
+ */
+function batchSize(ordered: PendingEntry[]): number {
+	let cut = Math.min(ordered.length, MAX_BATCH);
+	while (cut > 0 && cut < ordered.length && threadKeyOf(ordered[cut]!.msg) === threadKeyOf(ordered[cut - 1]!.msg))
+		cut--;
+	return cut === 0 ? Math.min(ordered.length, MAX_BATCH) : cut;
 }
 
 /** 生成消息 id */
@@ -799,7 +838,7 @@ export class PeerStore {
 		return { ok: true, to: resolved.member.name, id };
 	}
 
-	/** 取走收件箱：先 rename 再读，保证同一条消息只会被投递一次 */
+	/** 取走收件箱：先读后 rename，同一条消息只会被投递一次 */
 	drain(key: string): PeerMessage[] {
 		const dir = this.pendingDir(key);
 		let files: string[];
@@ -812,21 +851,25 @@ export class PeerStore {
 			return [];
 		}
 
+		const queued: PendingEntry[] = [];
+		for (const f of files) {
+			const msg = readJson<PeerMessage>(path.join(dir, f));
+			if (msg && typeof msg.text === "string" && typeof msg.from === "string") queued.push({ file: f, msg });
+		}
+		const ordered = groupByThread(queued);
+
 		const delivered = this.deliveredDir(key);
 		fs.mkdirSync(delivered, { recursive: true, mode: DIR_MODE });
 
 		const out: PeerMessage[] = [];
-		for (const f of files.slice(0, MAX_BATCH)) {
-			const from = path.join(dir, f);
-			const to = path.join(delivered, f);
+		for (const { file, msg } of ordered.slice(0, batchSize(ordered))) {
 			try {
-				fs.renameSync(from, to);
+				fs.renameSync(path.join(dir, file), path.join(delivered, file));
 			} catch {
 				// 已被另一次 drain 取走
 				continue;
 			}
-			const msg = readJson<PeerMessage>(to);
-			if (msg && typeof msg.text === "string" && typeof msg.from === "string") out.push(msg);
+			out.push(msg);
 		}
 		return out;
 	}
@@ -848,12 +891,13 @@ export class PeerStore {
 		} catch {
 			return [];
 		}
-		const out: PeerMessage[] = [];
-		for (const f of files.slice(0, MAX_BATCH)) {
+		const queued: PendingEntry[] = [];
+		for (const f of files) {
 			const msg = readJson<PeerMessage>(path.join(dir, f));
-			if (msg && typeof msg.text === "string" && typeof msg.from === "string") out.push(msg);
+			if (msg && typeof msg.text === "string" && typeof msg.from === "string") queued.push({ file: f, msg });
 		}
-		return out;
+		const ordered = groupByThread(queued);
+		return ordered.slice(0, batchSize(ordered)).map((e) => e.msg);
 	}
 
 	/**
