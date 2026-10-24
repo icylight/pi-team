@@ -7,7 +7,7 @@ const mono = Geist_Mono({ variable: "--font-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
 	title: "工单看板",
-	description: "本机所有项目的工单台账（只读）",
+	description: "本机所有项目的工单台账（除写评论外只读）",
 };
 
 // 布局里读库算侧边栏，整站按动态渲染

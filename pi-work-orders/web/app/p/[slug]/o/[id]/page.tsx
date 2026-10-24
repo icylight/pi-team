@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ledgers, orderPage } from "@/lib/ledger";
 import { eventMove } from "../../../../../../core/format";
 import { formatAgo, minutesSince, nowMs, stamp } from "@/lib/time";
+import { CommentForm } from "./comment-form";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +26,7 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 	} catch {
 		notFound();
 	}
-	const { view, states, events } = data;
+	const { view, states, events, comments } = data;
 	const now = nowMs();
 
 	const fields: string[] = [
@@ -117,6 +118,29 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 					<Markdown text={view.body} />
 				</article>
 			) : null}
+
+			<section className="mt-8">
+				<h2 className="border-b pb-1.5 text-base font-semibold">评论</h2>
+				{comments.length ? (
+					<ul className="mt-2 flex flex-col gap-3">
+						{comments.map((c) => (
+							<li key={c.id} className="border-l-2 border-l-border pl-3">
+								<p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+									<span className="text-foreground">
+										<ActorName name={c.actor} />
+									</span>
+									{c.revision == null ? null : <span className="font-mono">rev{c.revision}</span>}
+									<span title={c.at}>{stamp(c.at)}</span>
+								</p>
+								<p className="mt-0.5 text-sm leading-relaxed whitespace-pre-wrap">{c.body}</p>
+							</li>
+						))}
+					</ul>
+				) : (
+					<p className="mt-2 text-sm text-muted-foreground">还没有评论</p>
+				)}
+				<CommentForm slug={slug} id={view.id} />
+			</section>
 
 			{events.length ? (
 				<section className="mt-8">

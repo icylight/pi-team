@@ -1,7 +1,8 @@
 /**
  * 看板的数据层：读本机所有工单库，拼成页面要的快照。
  *
- * 库一律只读打开，不迁移——看板只看不改；schema 落后的库读不了，页面提示去项目里升。
+ * 读一律只读打开，不迁移——schema 落后的库读不了，页面提示去项目里升。
+ * 唯一的写入口是评论（postComment）：它先只读验一次版本，再开读写连接写那一行，结构仍不动。
  * 取数逻辑直接复用工单包的 core/*，不重写状态与等待推导。
  */
 
@@ -9,16 +10,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { readDispatch, type DispatchSnapshot } from "../../core/dispatch.ts";
-import { eventsOf, openLedger, statesOf } from "../../core/schema.ts";
+import { addComment, commentsOf, eventsOf, openLedger, statesOf } from "../../core/schema.ts";
 import { getOrder, listOrders, requirementOf, staleWaiting, waitingOrders } from "../../core/store.ts";
-import type {
-	ListedOrder,
-	Order,
-	OrderEvent,
-	OrderView,
-	Requirement,
-	StateDef,
-	Waiting,
+import {
+	HUMAN_ACTOR,
+	type ListedOrder,
+	type Order,
+	type OrderComment,
+	type OrderEvent,
+	type OrderView,
+	type Requirement,
+	type StateDef,
+	type Waiting,
 } from "../../core/types.ts";
 import { STALE_MINUTES } from "../../core/types.ts";
 import { discoverLedgers, type LedgerRef } from "./scan.ts";
@@ -45,6 +48,8 @@ export interface OrderPageData {
 	states: StateDef[];
 	view: OrderView;
 	events: OrderEvent[];
+	/** 新→旧，与 orders_show 的评论段同一取数口径 */
+	comments: OrderComment[];
 }
 
 /** 扫描根：显式给的优先，否则当前目录加上代码根目录 */
@@ -111,7 +116,24 @@ export function orderPage(ref: LedgerRef, id: string): OrderPageData {
 		states: statesOf(db),
 		view: getOrder(db, id),
 		events: eventsOf(db, id, 20),
+		comments: commentsOf(db, id, 50),
 	}));
+}
+
+/**
+ * 在页面上写一条评论。署名固定「用户」：页面后面坐着的只有人。
+ *
+ * 先只读打开一次再写：库比代码旧时那一步就抛「库需要从 X 升到 Y」，
+ * 于是写路径不会顺手迁移 schema（看板只加评论这一行，不改结构），也省得第二次打开时才发现。
+ */
+export function postComment(ref: LedgerRef, id: string, body: string): OrderComment {
+	withLedger(ref, () => undefined);
+	const db = openLedger(ref.dbPath);
+	try {
+		return addComment(db, { orderId: id, actor: HUMAN_ACTOR, body });
+	} finally {
+		db.close();
+	}
 }
 
 /** 库版本旧时补上怎么升：光看「只读打开」这句，不知道下一步该干什么 */
