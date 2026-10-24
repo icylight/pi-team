@@ -338,7 +338,7 @@ schema 版本 7；旧库打开时逐版升级，v2 加 `events` 表，v3 给工�
 
 | 频道 | 方向 | 载荷 |
 |---|---|---|
-| `peer:deliver` | 台账 → peer | `{ id, targets: string[], text, requireIdle: true, priority: "normal", handoff: { id, lease } }` |
+| `peer:deliver` | 台账 → peer | `{ id, targets: string[], text, requireIdle: true, handoff: { id, lease } }`；`requireIdle` 让交接只在目标空闲时注入 |
 | `peer:deliver:result` | peer → 台账 | `{ id, ok, to?, detail }` |
 | `peer:whoami` | 台账 → peer | `{ id }` |
 | `peer:whoami:result` | peer → 台账 | `{ id, name }` |

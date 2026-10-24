@@ -246,7 +246,7 @@ test("跨包完整链路：忙时耐久等待，重启后自动恢复，注入�
 		await h.emit("session_shutdown");
 		await h.emit("session_start");
 		await waitFor(() => h.sent.length === 1);
-		assert.equal(h.sent[0].options.deliverAs, "followUp");
+		assert.equal(h.sent[0].options.deliverAs, "steer");
 		const states = await h.call("orders_notifications", { id: "T01" });
 		assert.equal(JSON.parse(states.content[0].text)[0].status, "delivered");
 		assert.match((await h.call("orders_show", { id: "T01" })).content[0].text, /待认领/);
@@ -279,7 +279,7 @@ test("跨包确认丢失：重启后用持久历史补确认，不重复注入�
 	}
 });
 
-test("跨包离线恢复：目标出现后自动投；普通 followUp 和显式 urgent steer 分流", async () => {
+test("跨包离线恢复：目标出现后自动投，工单通知与普通消息都走 steer", async () => {
 	const h = await mounted();
 	try {
 		const created = await h.call("orders_create", { title: "合成离线任务", nextActors: ["qa"], actor: "owner" });
@@ -293,20 +293,18 @@ test("跨包离线恢复：目标出现后自动投；普通 followUp 和显式 
 		const actualPeer = await import("../store.ts");
 		const store = new actualPeer.PeerStore(path.join(h.cwd, "peers"), h.cwd);
 		const me = store.listMembers()[0];
-		for (const priority of ["normal", "urgent"] as const)
-			store.send({
-				id: actualPeer.newMessageId(),
-				from: "other",
-				fromName: "owner",
-				to: me.key,
-				text: priority,
-				priority,
-				ts: Date.now(),
-			});
-		await waitFor(() => h.sent.length === 3);
+		store.send({
+			id: actualPeer.newMessageId(),
+			from: "other",
+			fromName: "owner",
+			to: me.key,
+			text: "第二条普通消息",
+			ts: Date.now(),
+		});
+		await waitFor(() => h.sent.length === 2);
 		assert.deepEqual(
 			h.sent.map((s) => s.options.deliverAs),
-			["followUp", "followUp", "steer"],
+			["steer", "steer"],
 		);
 	} finally {
 		await h.close();

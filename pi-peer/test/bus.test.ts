@@ -264,19 +264,19 @@ test("候选都不在线：回失败，且不写进任何收件箱", async () =>
 	}
 });
 
-test("普通消息拒绝旧版目标，紧急消息显式保留兼容通道", async () => {
+test("peer_send 投给旧版目标也直接写收件箱，不带优先级参数", async () => {
 	const { cwd, peerRoot, store } = tmpPair();
 	const peer = mountPeer(cwd, peerRoot);
 	try {
 		await peer.handlers.get("session_start")({}, ctxFor(cwd));
 		liveMember(peerRoot, cwd, "9000-aaaa", "dev");
 		const tool = peer.tools.get("peer_send");
-		await assert.rejects(tool.execute("call", { to: "dev", text: "normal" }), /目标版本不支持/);
-		await assert.rejects(tool.execute("call", { to: "dev", text: "bad", priority: "invalid" }), /priority/);
-		assert.equal(store.drain("9000-aaaa").length, 0);
-		const result = await tool.execute("call", { to: "dev", text: "urgent", priority: "urgent" });
-		assert.match(result.content[0].text, /urgent \/ steer/);
-		assert.equal(store.drain("9000-aaaa")[0].priority, "urgent");
+		assert.equal(tool.parameters.properties.priority, undefined, "优先级参数已移除");
+		const result = await tool.execute("call", { to: "dev", text: "只有一条路" });
+		assert.match(result.content[0].text, /steer/);
+		const drained = store.drain("9000-aaaa");
+		assert.equal(drained.length, 1);
+		assert.equal(drained[0].priority, undefined, "消息不再带 priority 字段");
 	} finally {
 		peer.restore();
 	}
@@ -295,7 +295,6 @@ test("缺少新版台账消费端时不把耐久交接降级成普通正文", as
 				id: "req",
 				targets: ["dev"],
 				text: "handoff",
-				priority: "normal",
 				handoff: { id: "phase", lease: "lease" },
 			});
 		assert.equal(results[0].ok, false);

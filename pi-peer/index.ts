@@ -8,8 +8,8 @@
  * - 发消息 = 往对方的 pending/ 目录原子写一个 JSON
  * - 收消息 = fs.watch 监听自己的 pending/（2s 轮询兜底），取走后注入会话并唤醒对方；
  *   按对话成组取（同一 thread 不拆到两批，一批在 MAX_BATCH 处退到对话边界），
- *   注入正文首行带发送时刻；自己正跑一轮时普通消息不取，留在 pending/ 并提示一句，
- *   这一轮结束后补投（会话也可以用 peer_fetch 提前取走，取走的不再自动注入）
+ *   注入正文首行带发送时刻；一律以 steer 插进对方当前轮，自己正跑一轮时也取走投递，不堆积；
+ *   同一批消息合成一条注入，一批只跑一轮（pi 空闲时每条 sendMessage 各起一轮）
  * - 跨项目：按「项目标签/名字」寻址，投递写的是对方的桶；接收方不用升级也能收
  *
  * 与其他方案的区别：不依赖 tmux、不起 broker 进程、无网络、无第三方依赖。
@@ -26,7 +26,7 @@
  * 角色会话：领取角色时把角色卡与项目流程注入 system prompt，消息按具体实例名寻址。
  * 重启会话会沿用会话里记录的角色（含中途切换与取消）。
  *
- * 工具：peer_list / peer_send / peer_inbox / peer_fetch
+ * 工具：peer_list / peer_send / peer_inbox
  *
  * 关闭：项目内 <cwd>/.pi/peer.json 写 {"enabled": false}；或进程级环境变量 PI_PEER_OFF=1
  */
@@ -83,8 +83,8 @@ const LEGACY_PEER_TYPE = "peer";
 const HEARTBEAT_MS = 5_000;
 const POLL_MS = 2_000;
 const DRAIN_DEBOUNCE_MS = 50;
-/** peer_fetch 一次最多取几条：够看清手上的信，又不至于一下把收件箱掏空 */
-const MAX_FETCH = 10;
+/** 一批普通消息合并注入的正文预算：超过就分成几个包，一次请求不被积压挤爆 */
+const BATCH_CHARS = 16_000;
 /** 会话条目类型：记录本会话领取的角色，重启后据此恢复 */
 const ROLE_ENTRY = "peer-role";
 const ROLE_DEFAULTS_ENTRY = "peer-role-defaults";
@@ -110,8 +110,6 @@ let pollTimer: NodeJS.Timeout | undefined;
 let drainTimer: NodeJS.Timeout | undefined;
 let watcher: fs.FSWatcher | undefined;
 let draining = false;
-/** 已经提示过「有信等着」的消息 id：轮询每轮都会重看收件箱，不去重就反复弹同一条 */
-const announcedWaiting = new Set<string>();
 let roleCard: string | undefined;
 let flowDocument: string | undefined;
 let handleSessionControl: ((message: PeerMessage) => Promise<void>) | undefined;
@@ -674,7 +672,6 @@ export default function (pi: ExtensionAPI) {
 		opts: {
 			replyTo?: string;
 			thread?: string;
-			priority?: "normal" | "urgent";
 			handoff?: PeerMessage["handoff"];
 		} = {},
 	): PeerMessage | undefined {
@@ -692,7 +689,6 @@ export default function (pi: ExtensionAPI) {
 			thread: opts.thread ?? parent?.thread ?? (parent ? parent.id : undefined) ?? id,
 			replyTo: parent?.id,
 			text: body.slice(0, MAX_TEXT),
-			priority: opts.priority ?? "normal",
 			handoff: opts.handoff,
 			ts: Date.now(),
 		};
@@ -765,7 +761,7 @@ export default function (pi: ExtensionAPI) {
 			"用 peer_list 查看当前文件夹下的 pi 会话（第一行是自己）；用 peer_send 给其他会话发消息（对方会被唤醒并看到正文）。",
 			'peer_list 传 scope="all" 看其他项目的会话；发消息时写「项目/名字」当目标。',
 			"收到 [peer …] 消息后只在确实需要回答或行动时才回复；对方只是通报进度或结论时不要回确认，避免两个会话互相刷屏。",
-			"自己在忙时收到的普通消息会留在收件箱，只弹一句提示；要提前看内容用 peer_fetch 取，取走的不再自动注入。",
+			"消息以 steer 插进对方当前轮，在它这一轮的工具返回后到达；对方在忙也照样取走投递，不堆在收件箱。",
 		],
 		parameters: Type.Object({
 			all: Type.Optional(Type.Boolean({ description: "包含已离线成员（默认只列在线的）" })),
@@ -839,32 +835,27 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "给同目录另一个 pi 会话发消息",
 		promptGuidelines: [
 			'peer_send 的 to 写「名字」就发给本项目；写「项目/名字」可以发给其他项目的会话（先用 peer_list 称 scope="all" 查）。',
+			"消息以 steer 插进对方当前轮，在它这一轮的工具返回后到达，不会打断这一轮；对方在忙也照样取走投递，不堆在收件箱。",
 		],
 		parameters: Type.Object({
 			to: Type.String({ description: "目标会话：名称、项目/名称、name#pid、id 前缀或 pid（先用 peer_list 查）" }),
 			text: Type.String({ description: "消息正文，说清楚你要什么" }),
 			replyTo: Type.Optional(Type.String({ description: "回复某条消息时填它的 id，会自动继承会话线索" })),
 			thread: Type.Optional(Type.String({ description: "显式指定会话线索 id" })),
-			priority: Type.Optional(Type.String({ description: "normal（默认，不打断）或 urgent（显式 steer 打断）" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!store || !self) return text("pi-peer 未启用（未注册成功）");
 
-			if (params.priority !== undefined && params.priority !== "normal" && params.priority !== "urgent")
-				throw new Error("priority 只接受 normal 或 urgent");
-			const priority = params.priority ?? "normal";
 			const res = resolveTarget(params.to);
 			if (!res.ok) return text(resolveHint(params.to, res));
-			if (priority === "normal" && res.member.messageProtocol !== 1)
-				throw new Error("目标版本不支持普通消息不打断，请先重载目标扩展");
 
-			const msg = deliverTo(res, params.text, { replyTo: params.replyTo, thread: params.thread, priority });
+			const msg = deliverTo(res, params.text, { replyTo: params.replyTo, thread: params.thread });
 			if (!msg) return text("pi-peer 未启用（未注册成功）");
 			exitFocusIfNeeded();
 			ctx?.ui.notify(`→ ${res.member.name}: ${firstLine(msg.text)}`, "info");
 
 			return text(
-				`已写入 ${res.member.name} 的收件箱｜id=${msg.id}｜${priority === "urgent" ? "urgent / steer，允许打断" : "normal / 空闲时立刻唤醒，对方在忙则留在收件箱等这一轮结束"}；写入收件箱不代表已处理`,
+				`已写入 ${res.member.name} 的收件箱｜id=${msg.id}｜steer，在对方这一轮的工具返回后插入；写入收件箱不代表已处理`,
 			);
 		},
 	});
@@ -986,39 +977,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
-		name: "peer_fetch",
-		label: "Peer Fetch",
-		description:
-			"主动取走收件箱里等着投递的 peer 消息：直接拿到正文，取走的不会再自动注入一遍。忙时收到「有信等着」的提示后用它提前看。",
-		promptSnippet: "主动取走收件箱里等待投递的消息",
-		parameters: Type.Object({
-			limit: Type.Optional(Type.Number({ description: "最多取几条，默认 5" })),
-		}),
-		async execute(_toolCallId, params) {
-			if (!store || !self) return text("pi-peer 未启用（未注册成功）");
-			const limit = Math.min(MAX_FETCH, Math.max(1, Math.floor(params.limit ?? 5)));
-			const waiting = store.peekPending(self.key).filter(isWaitingNormal);
-			if (waiting.length === 0) {
-				return text("收件箱里没有等着投递的消息。交接、控制消息与紧急消息不走这条路径，它们会直接送达。");
-			}
-			const taken = store.takePending(
-				self.key,
-				waiting.slice(0, limit).map((m) => m.id),
-			);
-			for (const msg of taken) announcedWaiting.delete(msg.id);
-			if (taken.length === 0) return text("这几条在取出前已经被自动投递了，按会话里的注入处理。");
-			const lines = taken.map((m) => {
-				return `[${messageStamp(m.ts)}｜${relativeAge(m.ts)}] ${m.fromName} id=${m.id}\n  ${m.text.replace(/\n/g, "\n  ")}`;
-			});
-			const rest = store.peekPending(self.key).filter(isWaitingNormal);
-			const tail = rest.length
-				? `\n\n收件箱还有 ${[...new Set(rest.map((m) => m.fromName))].join("、")} 的消息没取，需要就再调一次 peer_fetch。`
-				: "";
-			return text(`已取走（不会再自动注入）：\n${lines.join("\n")}${tail}`);
-		},
-	});
-
 	// ── 代其他扩展投递：pi-work-orders 的派工走这里 ────
 	//
 	// 约定四个频道（两边都改动时要同时改）：
@@ -1052,7 +1010,6 @@ export default function (pi: ExtensionAPI) {
 					targets?: string[];
 					text?: string;
 					requireIdle?: boolean;
-					priority?: "normal" | "urgent";
 					handoff?: PeerMessage["handoff"];
 			  }
 			| undefined;
@@ -1089,7 +1046,6 @@ export default function (pi: ExtensionAPI) {
 				continue;
 			}
 			const message = deliverTo(resolved, request.text ?? "", {
-				priority: request.priority ?? "normal",
 				handoff: request.handoff,
 			});
 			if (message) return reply(true, "已写入收件箱，尚未确认注入", resolved.member.name);
@@ -1331,8 +1287,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("pi-peer 未启用", "warning");
 				return;
 			}
-			const urgent = args.trim().startsWith("--urgent ");
-			const m = /^(\S+)\s+([\s\S]+)$/.exec(urgent ? args.trim().slice("--urgent ".length) : args.trim());
+			const m = /^(\S+)\s+([\s\S]+)$/.exec(args.trim());
 			if (!m) {
 				ctx.ui.notify("用法：/peer-send <目标|项目/目标> <正文>", "warning");
 				return;
@@ -1342,16 +1297,9 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(resolveHint(m[1], res), "warning");
 				return;
 			}
-			if (!urgent && res.member.messageProtocol !== 1) {
-				ctx.ui.notify("目标版本不支持普通消息不打断，请先重载目标扩展", "warning");
-				return;
-			}
-			deliverTo(res, m[2], { priority: urgent ? "urgent" : "normal" });
+			deliverTo(res, m[2]);
 			exitFocusIfNeeded();
-			ctx.ui.notify(
-				`→ ${res.member.name}（已写入收件箱，${urgent ? "urgent / steer" : "normal / followUp"}）`,
-				"info",
-			);
+			ctx.ui.notify(`→ ${res.member.name}（已写入收件箱，steer 在它这一轮的工具返回后插入）`, "info");
 		},
 	});
 
@@ -1703,51 +1651,34 @@ function selfBusy(): boolean {
 }
 
 /**
- * 能留在收件箱里等的普通消息。
- *
- * 交接要按台账阶段校验、控制消息要立刻执行、urgent 是要插队的，
- * 这三类都不进待取窗口，照原路径走。
+ * 等空闲的普通消息已随 normal 通路一起移除：所有普通消息都走 steer，
+ * 忙时也取走投递，不留待取窗口。
  */
-function isWaitingNormal(msg: PeerMessage): boolean {
-	return !msg.handoff && !msg.control && msg.priority !== "urgent";
-}
-
-/** 忙时提示一次「有信等着」；正文等这一轮结束再投，想提前看用 peer_fetch */
-function announceWaiting(waiting: PeerMessage[]): void {
-	const ids = new Set(waiting.map((m) => m.id));
-	for (const seen of announcedWaiting) if (!ids.has(seen)) announcedWaiting.delete(seen);
-	const fresh = waiting.filter((m) => !announcedWaiting.has(m.id));
-	if (fresh.length === 0) return;
-	for (const m of fresh) announcedWaiting.add(m.id);
-	const first = fresh[0] as PeerMessage;
-	const senders = [...new Set(waiting.map((m) => m.fromName))].join("、");
-	ctxRef?.ui.notify(
-		`← ${senders}：${firstLine(first.text)}（${messageStamp(first.ts)} 收，在忙，这一轮结束后送达；要提前看用 peer_fetch）`,
-		"info",
-	);
-}
-
 async function drainAndDeliver(): Promise<void> {
 	// 专注期间不取收件箱：消息留在 pending，退出后再投；也不唤醒本轮
 	if (focused || draining || !store || !self) return;
 	draining = true;
 	const activeStore = store;
 	const activeMember = self;
+	// 消息攒在一起投：pi 在空闲且 triggerTurn 时每条 sendMessage 各起一轮，
+	// 逐条投等于一批跑 N 轮。攒到交接/控制消息或批次末尾，再一次性注入。
+	const buffered: PeerMessage[] = [];
+	const flush = (): void => {
+		if (buffered.length === 0) return;
+		deliverGroup(buffered.splice(0, buffered.length));
+	};
 	try {
-		if (selfBusy()) {
-			// 在忙：普通消息不取，留在收件箱等这一轮结束；先提示一句让人知道有信
-			const waiting = activeStore.peekPending(activeMember.key);
-			const deferred = waiting.filter(isWaitingNormal);
-			announceWaiting(deferred);
-			// 全是普通消息就不进 drain，免得每轮 rename 一次又放回去
-			if (deferred.length === waiting.length) return;
-		}
 		for (const msg of activeStore.drain(activeMember.key)) {
-			if (store !== activeStore || self !== activeMember) break;
+			if (store !== activeStore || self !== activeMember) {
+				for (const m of [...buffered.splice(0, buffered.length), msg]) activeStore.requeue(activeMember.key, m);
+				break;
+			}
 			if (msg.control) {
+				flush();
 				await handleSessionControl?.(msg);
 				await handleControl?.(msg);
 			} else if (msg.handoff) {
+				flush();
 				const persisted = diskHasHandoff(msg.handoff.id);
 				if (selfBusy()) {
 					// 忙就放回去等下一轮：drain 已把它 rename 进 delivered，
@@ -1765,15 +1696,26 @@ async function drainAndDeliver(): Promise<void> {
 						else if (!deliver(msg)) throw new Error("会话注入失败");
 					},
 				});
-			} else if (selfBusy() && isWaitingNormal(msg)) {
-				// 上面那批里混了普通消息（同批还有 urgent）：放回去等这一轮结束
-				activeStore.requeue(activeMember.key, msg);
-			} else deliver(msg);
+			} else {
+				// 普通消息一律攒着，批次末尾一次投
+				buffered.push(msg);
+			}
 		}
+		flush();
 	} catch (err) {
 		ctxRef?.ui.notify(`pi-peer 收信失败：${(err as Error).message}`, "error");
 	} finally {
 		draining = false;
+		if (buffered.length > 0) {
+			// 异常或会话切换路径：已 rename 的消息放回收件箱，别让它凭空消失
+			for (const msg of buffered.splice(0, buffered.length)) {
+				try {
+					activeStore.requeue(activeMember.key, msg);
+				} catch {
+					// 目录已不存在时无处可放
+				}
+			}
+		}
 	}
 }
 
@@ -1869,9 +1811,11 @@ function ensureMessageRenderer(source: string): void {
 }
 
 const renderPeerMessage: MessageRenderer = (message, options, theme) => {
-	const details = (message.details ?? {}) as { fromName?: string; fromModel?: string };
-	const head =
-		theme.fg("accent", `⇄ ${details.fromName ?? "peer"}`) + theme.fg("dim", ` · ${details.fromModel ?? "?"}`);
+	const details = (message.details ?? {}) as { fromName?: string; fromModel?: string; senders?: string[] };
+	// 批量消息没有单一发件人，抬头按发件人名单写
+	const head = details.senders?.length
+		? theme.fg("accent", `⇄ ${details.senders.join("、")}`) + theme.fg("dim", " · 批量")
+		: theme.fg("accent", `⇄ ${details.fromName ?? "peer"}`) + theme.fg("dim", ` · ${details.fromModel ?? "?"}`);
 	const content =
 		typeof message.content === "string"
 			? message.content
@@ -1884,9 +1828,69 @@ const renderPeerMessage: MessageRenderer = (message, options, theme) => {
 	return new Text(`${head}\n${body}`, options.outputPad, 0);
 };
 
+/**
+ * 一批消息合成一条注入。
+ *
+ * pi 的 sendCustomMessage 在空闲且 triggerTurn 时每条都 _startRun 开一轮，
+ * 只有流式期间才进队列；而 followUp 队列默认 one-at-a-time，一轮也只吃一条。
+ * 所以「一批只跑一轮」只能在扩展侧把正文合起来做。
+ */
+function deliverGroup(msgs: PeerMessage[]): void {
+	if (msgs.length === 0) return;
+	if (msgs.length === 1) {
+		deliver(msgs[0] as PeerMessage);
+		return;
+	}
+	// 按正文长度装包：积压很多时宁可分几次投，也不把一次请求撑爆
+	let pack: PeerMessage[] = [];
+	let size = 0;
+	const post = (): void => {
+		if (pack.length === 0) return;
+		deliverBatch(pack);
+		pack = [];
+		size = 0;
+	};
+	for (const msg of msgs) {
+		if (pack.length > 0 && size + msg.text.length > BATCH_CHARS) post();
+		pack.push(msg);
+		size += msg.text.length;
+	}
+	post();
+}
+
+/** 把一批消息写成一条自定义消息：正文逐条分列，各带来源与 id，便于逐条回复 */
+function deliverBatch(msgs: PeerMessage[]): boolean {
+	if (!api || msgs.length === 0) return false;
+
+	const senders = [...new Set(msgs.map((m) => m.fromName))];
+	const body = [`[peer 批次｜${msgs.length} 条｜${senders.join("、")}]`, ""];
+	msgs.forEach((msg, index) => {
+		body.push(`── ${index + 1}｜${msg.fromName}｜${messageStamp(msg.ts)}｜id=${msg.id}`, "", msg.text, "");
+	});
+	body.push(
+		`—— 以上 ${msgs.length} 条来自 ${senders.length} 个 pi 会话，本批一次送达。逐条回复时 peer_send 的 replyTo 填对应条目的 id；一条回复覆盖多条就不用填。`,
+	);
+
+	// LEGACY_PEER_TYPE 的渲染器在扩展加载时就注册了，这里不必重复
+	try {
+		api.sendMessage(
+			{
+				customType: LEGACY_PEER_TYPE,
+				content: body.join("\n"),
+				display: true,
+				details: { batch: true, senders, ids: msgs.map((m) => m.id) },
+			},
+			{ triggerTurn: true, deliverAs: "steer" },
+		);
+		return true;
+	} catch (err) {
+		ctxRef?.ui.notify(`pi-peer 注入消息失败：${(err as Error).message}`, "error");
+		return false;
+	}
+}
+
 function deliver(msg: PeerMessage): boolean {
 	if (!api) return false;
-	announcedWaiting.delete(msg.id);
 
 	// 首行给模型认来源（custom 消息转成 LLM 输入时是普通 user 文本，没有额外标记）；
 	// 长度压到一行，免得 session tree 里正文被元信息挤掉。
@@ -1915,7 +1919,7 @@ function deliver(msg: PeerMessage): boolean {
 				},
 			},
 			// 耐久交接以当前分支 entry 的真实落盘记录确认；空白会话须先触发首次用户消息。
-			{ triggerTurn: !msg.handoff, deliverAs: msg.priority === "urgent" ? "steer" : "followUp" },
+			{ triggerTurn: !msg.handoff, deliverAs: "steer" },
 		);
 		if (msg.handoff) confirmHandoff(msg.handoff);
 		return true;

@@ -375,7 +375,8 @@ test("建单后唤醒下一步的人，并把结果写在返回里", async () =>
 	assert.equal(sent.length, 1, "只投一次，候选列表交给 peer 挑在线的那个");
 	assert.deepEqual(sent[0].targets, ["dev", "qa"]);
 	assert.match(sent[0].text, /工单交接 T01/);
-	assert.equal(sent[0].priority, "normal");
+	assert.equal(sent[0].requireIdle, true, "交接只在目标空闲时注入");
+	assert.equal(sent[0].priority, undefined, "不再带优先级：普通消息一律 steer");
 	assert.equal(typeof sent[0].handoff.lease, "string");
 });
 

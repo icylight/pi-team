@@ -443,7 +443,7 @@ export default function (pi: ExtensionAPI) {
 					detail: replyData.detail ?? (replyData.ok ? "已写入收件箱，等待注入确认" : "未知原因"),
 				});
 			});
-			events.emit(WAKE_CHANNEL, { id, targets, text, requireIdle: true, priority: "normal", handoff });
+			events.emit(WAKE_CHANNEL, { id, targets, text, requireIdle: true, handoff });
 		});
 		return reply;
 	}
