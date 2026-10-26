@@ -11,6 +11,7 @@ import { ledgers, orderPage } from "@/lib/ledger";
 import { eventMove } from "../../../../../../core/format";
 import { formatAgo, minutesSince, nowMs, stamp } from "@/lib/time";
 import { CommentForm } from "./comment-form";
+import { StateForm } from "./state-form";
 
 export const dynamic = "force-dynamic";
 
@@ -94,6 +95,14 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 						<span key={f}>· {f}</span>
 					))}
 				</div>
+				<StateForm
+					slug={ref.slug}
+					id={view.id}
+					state={view.state}
+					revision={view.revision}
+					nextActors={view.nextActors}
+					states={states}
+				/>
 			</header>
 
 			{view.staleDeps.length ? (
@@ -145,6 +154,7 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 			{events.length ? (
 				<section className="mt-8">
 					<h2 className="border-b pb-1.5 text-base font-semibold">动作记录</h2>
+					<p className="mt-1 text-xs text-muted-foreground">最近 {events.length} 条，新的在上</p>
 					<Table className="mt-2">
 						<TableHeader>
 							<TableRow>
@@ -155,21 +165,16 @@ export default async function OrderPage({ params }: PageProps<"/p/[slug]/o/[id]"
 							</TableRow>
 						</TableHeader>
 						<TableBody>
-							{events
-								.slice()
-								.reverse()
-								.map((e) => (
-									<TableRow key={e.id}>
-										<TableCell className="font-mono text-xs text-muted-foreground" title={e.at}>
-											{stamp(e.at).slice(5)}
-										</TableCell>
-										<TableCell className="text-sm">{e.actor}</TableCell>
-										<TableCell className="text-sm">
-											{eventMove(e)}
-										</TableCell>
-										<TableCell className="text-sm">{e.note}</TableCell>
-									</TableRow>
-								))}
+							{events.map((e) => (
+								<TableRow key={e.id}>
+									<TableCell className="font-mono text-xs text-muted-foreground" title={e.at}>
+										{stamp(e.at).slice(5)}
+									</TableCell>
+									<TableCell className="text-sm">{e.actor}</TableCell>
+									<TableCell className="text-sm">{eventMove(e)}</TableCell>
+									<TableCell className="text-sm">{e.note}</TableCell>
+								</TableRow>
+							))}
 						</TableBody>
 					</Table>
 				</section>

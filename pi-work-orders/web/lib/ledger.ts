@@ -2,8 +2,9 @@
  * 看板的数据层：读本机所有工单库，拼成页面要的快照。
  *
  * 读一律只读打开，不迁移——schema 落后的库读不了，页面提示去项目里升。
- * 唯一的写入口是评论（postComment）：它先只读验一次版本，再开读写连接写那一行，结构仍不动。
- * 取数逻辑直接复用工单包的 core/*，不重写状态与等待推导。
+ * 写入口有两个：评论（postComment）与状态推进（advanceState）；两者都先只读验一次版本，
+ * 再开读写连接写那一行，结构仍不动。
+ * 取数逻辑与状态规则直接复用工单包的 core/*，不重写等待推导，也不重写流转校验。
  */
 
 import * as os from "node:os";
@@ -11,7 +12,7 @@ import * as path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { readDispatch, type DispatchSnapshot } from "../../core/dispatch.ts";
 import { addComment, commentsOf, eventsOf, openLedger, statesOf } from "../../core/schema.ts";
-import { getOrder, listOrders, requirementOf, staleWaiting, waitingOrders } from "../../core/store.ts";
+import { getOrder, listOrders, requirementOf, staleWaiting, updateOrder, waitingOrders } from "../../core/store.ts";
 import {
 	HUMAN_ACTOR,
 	type ListedOrder,
@@ -21,6 +22,7 @@ import {
 	type OrderView,
 	type Requirement,
 	type StateDef,
+	type UpdateInput,
 	type Waiting,
 } from "../../core/types.ts";
 import { STALE_MINUTES } from "../../core/types.ts";
@@ -131,6 +133,28 @@ export function postComment(ref: LedgerRef, id: string, body: string): OrderComm
 	const db = openLedger(ref.dbPath);
 	try {
 		return addComment(db, { orderId: id, actor: HUMAN_ACTOR, body });
+	} finally {
+		db.close();
+	}
+}
+
+/**
+ * 在页面上推一条工单的状态。署名固定「用户」：页面后面坐着的只有人。
+ *
+ * 流转校验全交给 core 的 updateOrder：单执行者状态、终态要终止依据、内容锁，这里不复制一份；
+ * 传 expectedRevision 是为了拦住「页面开着、别的会话先改了」这种覆盖。
+ */
+export function advanceState(
+	ref: LedgerRef,
+	id: string,
+	patch: UpdateInput,
+	reason: string,
+	expectedRevision?: number,
+): OrderView {
+	withLedger(ref, () => undefined);
+	const db = openLedger(ref.dbPath);
+	try {
+		return updateOrder(db, id, patch, { actor: HUMAN_ACTOR, reason }, expectedRevision);
 	} finally {
 		db.close();
 	}
