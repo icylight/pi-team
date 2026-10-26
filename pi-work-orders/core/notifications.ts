@@ -114,20 +114,31 @@ export function listNotifications(db: DatabaseSync, orderId?: string): Notificat
 	return rows.map((row) => fromRow(row));
 }
 
-/** 重建通知缺口，不重放业务操作。多个会话同时扫描也只产生同一阶段的一条记录。 */
-export function reconcileNotifications(ledger: DatabaseSync, queue: DatabaseSync, at = Date.now()): void {
-	const current = handoffSnapshot(ledger);
+/**
+ * 重建通知缺口，不重放业务操作。多个会话同时扫描也只产生同一阶段的一条记录。
+ *
+ * `handoff` 不给默认值：发不发是项目配置（`workOrders.handoff`，默认不发）的结论，
+ * 由调用方传进来；这里不自作主张。不给时什么都不建，在等的旧记录标作废，
+ * 传输中的那条留给它自己走完（此刻标失效会让已经到达的送达确认落空）。
+ */
+export function reconcileNotifications(
+	ledger: DatabaseSync,
+	queue: DatabaseSync,
+	options: { handoff: boolean; at?: number },
+): void {
+	const at = options.at ?? Date.now();
+	const enabled = options.handoff;
+	const current = enabled ? handoffSnapshot(ledger) : [];
 	const ids = new Set(current.map((h) => h.id));
+	const obsoleteReason = enabled ? "交接已转派、取消或被新阶段取代" : "工单交接未开启（workOrders.handoff，默认不发）";
 	queue.exec("BEGIN IMMEDIATE");
 	try {
 		for (const old of listNotifications(queue)) {
-			if (!ids.has(old.id) && old.status !== "delivered" && old.status !== "obsolete") {
-				queue
-					.prepare(
-						"UPDATE notifications SET status='obsolete',reason='交接已转派、取消或被新阶段取代',lease=NULL,updated_at=? WHERE id=?",
-					)
-					.run(at, old.id);
-			}
+			if (ids.has(old.id) || old.status === "delivered" || old.status === "obsolete") continue;
+			if (!enabled && old.status === "sending") continue;
+			queue
+				.prepare("UPDATE notifications SET status='obsolete',reason=?,lease=NULL,updated_at=? WHERE id=?")
+				.run(obsoleteReason, at, old.id);
 		}
 		for (const h of current) {
 			queue

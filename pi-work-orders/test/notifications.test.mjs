@@ -27,7 +27,8 @@ function fixture() {
 		{ title: "合成任务", nextActors: ["dev"] },
 		{ actor: "owner", reason: "合成测试" },
 	);
-	const sync = (at) => reconcileNotifications(ledger, queue, at);
+	// 这一组用例验的是交接机制本身，默认开着；验「没开就不建」时传 { handoff: false }
+	const sync = (at, options = {}) => reconcileNotifications(ledger, queue, { handoff: true, at, ...options });
 	const rows = () => listNotifications(queue);
 	const claim = (at) =>
 		claimNotification(queue, rows().find((r) => r.status === "waiting" || r.status === "sending")?.id, at);
@@ -44,8 +45,8 @@ test("写库后通知落盘前崩溃：恢复扫描补齐，重复扫描不重�
 	const ledger = openLedger(h.file);
 	const queue = openNotifications(h.queueFile);
 	try {
-		reconcileNotifications(ledger, queue);
-		reconcileNotifications(ledger, queue);
+		reconcileNotifications(ledger, queue, { handoff: true });
+		reconcileNotifications(ledger, queue, { handoff: true });
 		assert.equal(listNotifications(queue).length, 1);
 		assert.equal(getOrder(ledger, h.order.id).revision, 1);
 	} finally {
@@ -81,6 +82,32 @@ test("忙碌或离线保留等待，重启后重新出租；发送/接收失联�
 		acknowledgeNotification(h.queue, recovered.id, recovered.lease);
 		assert.equal(h.rows()[0].status, "delivered");
 		assert.equal(getOrder(h.ledger, h.order.id).state, "待认领");
+	} finally {
+		h.close();
+	}
+});
+
+test("没开交接：不生成新记录，在等的旧记录标作废，传输中的留给它自己走完", () => {
+	const h = fixture();
+	try {
+		h.sync(100);
+		assert.equal(h.rows().length, 1);
+		const sending = h.claim(100);
+
+		// 传输中不动：此刻标失效会让已经到达的送达确认落空
+		h.sync(200, { handoff: false });
+		assert.equal(h.rows()[0].status, "sending");
+
+		// 回到等待就被关掉的那次扫描作废
+		deferNotification(h.queue, sending.id, sending.lease, "目标在忙", 300);
+		h.sync(400, { handoff: false });
+		assert.equal(h.rows()[0].status, "obsolete");
+		assert.match(h.rows()[0].reason, /workOrders\.handoff/);
+
+		// 关着时新阶段一条都不建
+		updateOrder(h.ledger, h.order.id, { nextActors: ["qa"] }, { actor: "owner", reason: "合成转派" });
+		h.sync(500, { handoff: false });
+		assert.equal(h.rows().length, 1);
 	} finally {
 		h.close();
 	}

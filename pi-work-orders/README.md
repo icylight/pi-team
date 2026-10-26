@@ -186,7 +186,7 @@ cd pi-work-orders/web && npm install && npm run build
 
 交接身份依据状态、责任人及交接/依赖事件，不使用普通行 revision。改正文不重发；转派、取消、认领或阶段取代使旧通知失效。派给本次交接操作者本人或人工执行者不通知；终态只使有效下游交接恢复。目标收到后再次校验当前业务与租约，只在空闲时同步写入会话；普通交接不 steer。按当前分支 entry id 在宿主当前会话 JSONL 中核对匹配记录后才记 delivered，不能把发送 API 返回或 `message_end` 当落盘证明。空白会话须先以 followUp 触发首次用户消息，再补持久化确认；确认等待有期限，后续由耐久租约恢复，未落盘不报送达。纯内存会话无法确认耐久交接。
 
-用 `orders_notifications(id="T01")` 查询等待、传输、已持久化、失效或失败及原因。sending 只代表传输租约；delivered 不代表已认领或完成。离线/忙碌不会消耗实际注入重试次数。注入或确认失败的实际尝试有界，达到上限记 failed/结果未知，须人工核实；不承诺跨通知库与会话日志的 exactly-once。旧版目标不支持消费协议时明确等待升级，不降级成无校验文本。
+用 `orders_notifications(id="T01")` 查询等待、传输、已持久化、失效或失败及原因。sending 只代表传输租约；delivered 不代表已认领或完成。离线/忙碌不会消耗实际注入重试次数。注入或确认失败的实际尝试有界，达到上限记 failed/结果未知，须人工核实；不承诺跨通知库与会话日志的 exactly-once。旧版目标不支持消费协议时明确等待升级，不降级成无校验文本。工单交接默认不发（`workOrders.handoff`），不发时不生成新记录、在等的旧记录标作废，接的人自己扫台账。
 
 **三、定时提醒跟着一个角色会话走**：配置里指定的角色（`followRole`）活着时，自己隔一会儿自查一次，有该提的单就把汇总注入成一条用户消息——等于它自己叫自己。会话不在就没人提，这是这个设计的边界。不配 `followRole` 就不跑，是默认行为。
 
@@ -201,12 +201,13 @@ cd pi-work-orders/web && npm install && npm run build
 
 同一条单命中多条时只留最紧迫的一条；估算从 80% 走到 100% 算两条信息，不会被 `repeatMinutes` 压掉。提醒文案里写明这是报读数不是催进度，避免收到的人只顾解释进度。
 
-配置就写在 pi-peer 的项目配置里，跟角色声明同一份。自动出声的两项（摘要、定时提醒）都默认关，配哪项就只响哪项：
+配置就写在 pi-peer 的项目配置里，跟角色声明同一份。这一段的三项都默认关，配哪项就只响哪项：
 
 ```json
 {
   "enabled": true,
   "workOrders": {
+    "handoff": true,
     "digest": true,
     "followRole": "owner",
     "intervalMinutes": 15,
@@ -219,6 +220,7 @@ cd pi-work-orders/web && npm install && npm run build
 ```
 
 - 路径 `<项目>/.pi/peer.json`；不写 `workOrders` 一段就静默，只落库不出声
+- `handoff` —— 写库后把工单交接投给下一步的人，默认 `false`（不发）。写 `true` 后打开时会把还在等的单一起补投。不发时不生成通知记录、在等的旧记录标作废，看板不再报「应该有通知」；接的人自己扫台账，定时提醒不受影响
 - `digest` —— 每轮把台账摘要注入系统提示，默认 `false`
 - `followRole` —— 定时提醒跟随的角色名，匹配角色实例名（`owner` 同时匹配 `owner-2`）；不写就不跑
 - `intervalMinutes` 隔多久看一次（15）｜ `staleMinutes` 等超多久算停滞（30）｜ `repeatMinutes` 同一条单最短隔多久再提（60）｜ `waitMinutes` 等依赖超多久要报（120）

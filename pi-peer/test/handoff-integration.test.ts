@@ -14,10 +14,14 @@ async function mounted(native = false, options: { wake?: boolean } = {}) {
 	fs.mkdirSync(path.join(cwd, ".pi", "characters"), { recursive: true });
 	for (const name of ["dev", "qa"])
 		fs.writeFileSync(path.join(cwd, ".pi", "characters", `${name}.md`), `${name} card`);
-	// 唤醒默认关；这里的用例验的是唤醒链路，所以要显式开
+	// 唤醒与交接都默认关；这里的用例验的是交接链路，所以要显式开。
+	// 唤醒随 options.wake 走（验「默认不叫醒」），交接正文一律开。
 	fs.writeFileSync(
 		path.join(cwd, ".pi", "peer.json"),
-		JSON.stringify(options.wake === false ? {} : { wakeOnHandoff: true }),
+		JSON.stringify({
+			workOrders: { handoff: true },
+			...(options.wake === false ? {} : { wakeOnHandoff: true }),
+		}),
 		"utf8",
 	);
 	const previousCwd = process.cwd();

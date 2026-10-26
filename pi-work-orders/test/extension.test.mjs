@@ -77,6 +77,11 @@ function writeProjectConfig(cwd, value) {
 	fs.writeFileSync(file, JSON.stringify(value), "utf8");
 }
 
+/** 交接默认不发：要验「投给下一步的人」的用例，先打开 workOrders.handoff */
+function enableHandoff(cwd) {
+	writeProjectConfig(cwd, { workOrders: { handoff: true } });
+}
+
 /** 把一条单的等待时刻推到阈值之外 */
 function ageOrder(cwd, orderId, minutes) {
 	const db = new DatabaseSync(path.join(cwd, ".work-orders", "work-orders.sqlite"));
@@ -368,6 +373,7 @@ test("建单后唤醒下一步的人，并把结果写在返回里", async () =>
 	const { tools, channels } = mount("owner");
 	const ctx = ctxFor(cwd);
 	const sent = fakePeer(channels);
+	enableHandoff(cwd);
 	await call(tools, "orders_init", {}, ctx);
 
 	const out = await call(tools, "orders_create", { title: "实现排序", nextActors: ["dev", "qa"] }, ctx);
@@ -410,6 +416,7 @@ test("交付时唤醒复核人，收口时改为唤醒刚解锁的下游", async
 	const { tools, channels } = mount("dev");
 	const ctx = ctxFor(cwd);
 	const sent = fakePeer(channels);
+	enableHandoff(cwd);
 	await call(tools, "orders_init", {}, ctx);
 	await call(tools, "orders_create", { title: "实现", nextActors: ["dev"] }, ctx);
 	await call(tools, "orders_create", { title: "验收", nextActors: ["qa"], dependsOn: ["T01"] }, ctx);
@@ -522,6 +529,7 @@ test("收口一条没有下游的单：不把已收口的单再交回给刚收�
 	const { tools, channels } = mount("qa");
 	const ctx = ctxFor(cwd);
 	const sent = fakePeer(channels, { ok: true, to: "qa" });
+	enableHandoff(cwd);
 	await call(tools, "orders_init", {}, ctx);
 	// owner 派给 qa（本会话），再自己认领、收口：全程只有派单那一次该叫人
 	await call(tools, "orders_create", { title: "复核某项", nextActors: ["qa"], actor: "owner" }, ctx);
@@ -583,12 +591,33 @@ test("派工要求对方空闲：忙的不投，如实回报", async () => {
 			}
 		},
 	]);
+	enableHandoff(cwd);
 	await call(tools, "orders_init", {}, ctx);
 
 	const out = await call(tools, "orders_create", { title: "实现排序", nextActors: ["dev"] }, ctx);
 	assert.match(out, /待认领/, "库照样落上");
 	assert.match(out, /waiting：dev 在忙/, "忙时留下可恢复等待状态");
 	assert.equal(sent[0].requireIdle, true, "派工必须声明只要空闲的");
+});
+
+test("交接默认不发：写库后一条不投，打开才投", async () => {
+	const cwd = tmpProject();
+	const { tools, handlers, channels } = mount("owner", { roleName: "owner" });
+	const ctx = ctxFor(cwd);
+	const sent = fakePeer(channels);
+	await call(tools, "orders_init", {}, ctx);
+
+	const quiet = await call(tools, "orders_create", { title: "默认安静", nextActors: ["dev"] }, ctx);
+	assert.equal(sent.length, 0, "不配就一条都不投");
+	assert.match(quiet, /待认领/, "建单本身照样成功");
+	assert.match(quiet, /workOrders\.handoff/, "返回里要能看出是没开，不是没人可派");
+
+	enableHandoff(cwd);
+	const loud = await call(tools, "orders_create", { title: "开了就投", nextActors: ["dev"] }, ctx);
+	// 打开时把还在等的单一起补上：T01 仍是待认领，所以补 T01 + 新建的 T02
+	assert.deepEqual(sent.map((m) => /T\d+/.exec(m.text)?.[0]).sort(), ["T01", "T02"]);
+	assert.match(loud, /sending：/, "返回里报出投递状态");
+	handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, ctx);
 });
 
 // ── 定时提醒：跟着角色会话走 ────────────────────────

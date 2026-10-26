@@ -42,6 +42,11 @@ function fixture() {
 	};
 	return { base, cwd, root, members, put };
 }
+/** 交接默认不发：要验「该来的通知」的用例，先在项目里写 workOrders.handoff=true */
+function enableHandoff(cwd) {
+	fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+	fs.writeFileSync(path.join(cwd, ".pi", "peer.json"), JSON.stringify({ workOrders: { handoff: true } }));
+}
 function ledgerFixture() {
 	const h = fixture();
 	const file = path.join(h.cwd, ".work-orders", "work-orders.sqlite");
@@ -125,6 +130,7 @@ test("联合投影区分基础角色候选与实例负载；ready 不因会话�
 
 test("读看板不生成通知库、不迁移/更改业务事件，也不清理过期会话", () => {
 	const h = ledgerFixture();
+	enableHandoff(h.cwd);
 	h.put("stale", { lastSeen: at - STALE_MS });
 	const history = eventsOf(h.db, h.order.id);
 	const row = getOrder(h.db, h.order.id);
@@ -143,11 +149,30 @@ test("读看板不生成通知库、不迁移/更改业务事件，也不清理�
 	}
 });
 
+test("交接默认不发：投影不报「应该有通知」，开了才报", () => {
+	const off = ledgerFixture();
+	try {
+		const view = readDispatch(off.db, off.file, off.cwd, off.root, at);
+		assert.equal(view.orders[0].notification.expected, false, "没开就没有该来的交接");
+	} finally {
+		off.db.close();
+	}
+	const on = ledgerFixture();
+	enableHandoff(on.cwd);
+	try {
+		const view = readDispatch(on.db, on.file, on.cwd, on.root, at);
+		assert.equal(view.orders[0].notification.expected, true, "开了就该有");
+	} finally {
+		on.db.close();
+	}
+});
+
 test("转派后历史 delivered 不冒充新阶段已送达；损坏通知库单独显示未知", () => {
 	const h = ledgerFixture();
+	enableHandoff(h.cwd);
 	const queue = openNotifications(notificationPath(h.file));
 	try {
-		reconcileNotifications(h.db, queue);
+		reconcileNotifications(h.db, queue, { handoff: true });
 		const row = claimNotification(queue, queue.prepare("SELECT id FROM notifications").get().id);
 		acknowledgeNotification(queue, row.id, row.lease);
 		updateOrder(h.db, h.order.id, { nextActors: ["qa"] }, { actor: "owner", reason: "合成转派" });
@@ -160,6 +185,7 @@ test("转派后历史 delivered 不冒充新阶段已送达；损坏通知库单
 		h.db.close();
 	}
 	const bad = ledgerFixture();
+	enableHandoff(bad.cwd);
 	fs.writeFileSync(notificationPath(bad.file), "synthetic-not-a-db");
 	try {
 		const view = readDispatch(bad.db, bad.file, bad.cwd, bad.root, at);

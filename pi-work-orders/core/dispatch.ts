@@ -12,6 +12,7 @@ import {
 import { statesOf } from "./schema.ts";
 import { listOrders, readyOrders } from "./store.ts";
 import { isHumanActor, type ListedOrder, type StateDef } from "./types.ts";
+import { loadWatchConfig, watchConfigFile } from "./watch.ts";
 
 export interface DispatchSession extends ObservedSession {
 	activeOrders: string[];
@@ -123,7 +124,10 @@ export function readDispatch(
 			queue?.close();
 		}
 	}
-	const current = new Map(handoffSnapshot(db).map((h) => [h.orderId, h.id]));
+	// 交接默认不发：没开 workOrders.handoff 就没有「应该有通知」这回事，
+	// 否则看板会拿一条永远不会来的交接报缺
+	const handoffOn = loadWatchConfig(watchConfigFile(cwd)).config.handoff;
+	const current = new Map(handoffOn ? handoffSnapshot(db).map((h) => [h.orderId, h.id]) : []);
 	return {
 		observedAt: at,
 		peers,

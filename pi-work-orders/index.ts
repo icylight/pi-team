@@ -8,7 +8,8 @@
  * 推进靠四条路，各管一段：
  * 1. 库是真相源：谁该动、挂了多久，任何会话都能查
  * 2. 每轮对话开始时算一次摘要注入上下文（before_agent_start）——只用台账、不用 peer 也看得到
- * 3. 写库后尝试唤醒对方（走 peer 的事件总线）——有 peer 就快，没 peer 不报错
+ * 3. 写库后投工单交接给下一步的人（走 peer 的事件总线）——有 peer 就快，没 peer 不报错；
+ *    默认不发，项目写 workOrders.handoff=true 才发，不发时接的人自己扫台账
  * 4. 定时提醒（跟一个角色会话走）——会话静下来时，停滞的单自己响
  *
  * 约定层的规则（角色怎么分工、状态集叫什么）不在这里，由项目的 skill 声明；
@@ -448,6 +449,12 @@ export default function (pi: ExtensionAPI) {
 		return reply;
 	}
 
+	/** 工单交接发不发：现读项目配置。默认不发，写 workOrders.handoff=true 才发 */
+	function handoffEnabled(ctx: ExtensionContext | undefined): boolean {
+		if (!ctx) return false;
+		return loadWatchConfig(watchConfigFile(ctx.cwd)).config.handoff;
+	}
+
 	/** 耐久交接可由任意同项目会话恢复，队列不依赖发起者存活。 */
 	let deliveryTimer: NodeJS.Timeout | undefined;
 	let flushing = false;
@@ -458,7 +465,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			queue = openNotifications(notificationPath(dbPathFor(ctx)));
 			const currentQueue = queue;
-			withDb(ctx, (db) => reconcileNotifications(db, currentQueue));
+			withDb(ctx, (db) => reconcileNotifications(db, currentQueue, { handoff: handoffEnabled(ctx) }));
 			for (const row of listNotifications(queue)
 				.filter((n) => n.status === "waiting" || (n.status === "sending" && n.leaseUntil <= Date.now()))
 				.slice(0, 20)) {
@@ -543,7 +550,9 @@ export default function (pi: ExtensionAPI) {
 				const rows = listNotifications(queue, mutation.order.id);
 				const note = rows.length
 					? rows.map((n) => `${n.status}：${n.reason || "等待目标会话持久化确认"}`).join("；")
-					: "当前无须通知（本人、人工作业或等待依赖）";
+					: handoffEnabled(ctx)
+						? "当前无须通知（本人、人工作业或等待依赖）"
+						: "当前不发工单交接（没开 workOrders.handoff，默认不发）";
 				return ok(`${mutation.text}\n台账写入成功；通知：${note}。通知不代表已认领。`);
 			} finally {
 				queue.close();

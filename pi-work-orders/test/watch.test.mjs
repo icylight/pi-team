@@ -90,6 +90,20 @@ test("digest 默认关，项目里写 true 才开", () => {
 	assert.match(bad.problems[0], /workOrders\.digest/);
 });
 
+test("交接默认不发，项目里写 true 才发", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "watch-cfg-"));
+	const file = path.join(dir, "peer.json");
+	assert.equal(loadWatchConfig(file).config.handoff, false, "不配就不往别人会话里投交接");
+
+	writeConfig(file, { workOrders: { handoff: true } });
+	assert.equal(loadWatchConfig(file).config.handoff, true);
+
+	writeConfig(file, { workOrders: { handoff: "off" } });
+	const bad = loadWatchConfig(file);
+	assert.equal(bad.config.handoff, false, "写错按默认不发，不漏发");
+	assert.match(bad.problems[0], /workOrders\.handoff/);
+});
+
 test("写错的字段被忽略并报出来，不悄悄按默认值跑", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "watch-cfg-"));
 	const file = path.join(dir, "peer.json");

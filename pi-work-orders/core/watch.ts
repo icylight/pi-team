@@ -28,6 +28,11 @@ import {
 import { isHumanActor, STALE_MINUTES, WAIT_MINUTES, type Waiting } from "./types.ts";
 
 export interface WatchConfig {
+	/**
+	 * 写库后是否把工单交接投给下一步的人：**默认不发**，项目里写 true 才发。
+	 * 不发时不落通知记录，接的人自己扫台账发现（定时提醒不受影响）。
+	 */
+	handoff: boolean;
 	/** 谁负责定时自查：角色名（peer 角色实例名，其次会话名）；空串 = 不跑 */
 	followRole: string;
 	/** 隔多少分钟看一次 */
@@ -45,6 +50,7 @@ export interface WatchConfig {
 }
 
 export const WATCH_DEFAULTS: WatchConfig = {
+	handoff: false,
 	followRole: "",
 	intervalMinutes: 15,
 	staleMinutes: STALE_MINUTES,
@@ -120,6 +126,10 @@ function readSection(file: string, problems: string[]): Record<string, unknown> 
 }
 
 function applyConfig(target: WatchConfig, source: Record<string, unknown>, file: string, problems: string[]): void {
+	if (source.handoff !== undefined) {
+		if (typeof source.handoff === "boolean") target.handoff = source.handoff;
+		else problems.push(`${file}：workOrders.handoff 要写 true 或 false，这一项被忽略`);
+	}
 	if (source.followRole !== undefined) {
 		if (typeof source.followRole === "string") target.followRole = source.followRole.trim();
 		else problems.push(`${file}：workOrders.followRole 要写角色名字符串，这一项被忽略`);
