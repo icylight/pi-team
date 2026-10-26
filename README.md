@@ -33,7 +33,7 @@ pi install /path/to/pi-team
 /peer-name owner
 /peers
 /peer-send dev 请接手接口实现
-/peer-focus            # 临时不接别人消息：对自己隐身，自己发出一条后自动退出
+/peer-focus            # 临时不接别人消息：别人仍看得到，但消息被拒发；自己发出一条后自动退出
 /orders
 ```
 

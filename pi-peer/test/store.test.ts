@@ -46,7 +46,7 @@ function member(
 		cwd: string;
 		busy: boolean;
 		busySince: number;
-		hidden: boolean;
+		muted: boolean;
 		role: string;
 		visibleTo: string[];
 	}> = {},
@@ -620,53 +620,58 @@ describe("忙闲：派工只找空闲的会话", () => {
 	});
 });
 
-describe("专注模式：隐身的会话不让别人选到", () => {
-	it("隐身成员不出现在别人的列表里，自己的列表里带 selfKey 还看得到", () => {
+describe("专注模式：可见但拒发", () => {
+	it("专注中的成员照常出现在别人的列表里", () => {
 		const store = freshStore();
 		member(store, "9000-1111", "watcher");
-		member(store, "9001-2222", "focused", { hidden: true });
+		member(store, "9001-2222", "focused", { muted: true });
 
-		const others = store.listScoped().map((s) => s.member.name);
-		assert.deepEqual(others, ["watcher"], "别人看不到隐身的会话");
+		const seen = store.listScoped().map((s) => s.member.name);
+		assert.deepEqual(seen.sort(), ["focused", "watcher"], "不隐身，发送方看得出它只是不收");
 		const mine = store.listScoped({ selfKey: "9001-2222" }).map((s) => s.member.name);
-		assert.deepEqual(mine.sort(), ["focused", "watcher"], "本人仍然看得到自己");
+		assert.deepEqual(mine.sort(), ["focused", "watcher"], "自己也看得见别人");
 	});
 
-	it("resolve 找不到隐身成员，报 none 而不是 offline：它确实在跑，只是不接", () => {
+	it("resolve 命中但报 muted：不是不在，是不收", () => {
 		const store = freshStore();
 		const me = member(store, "9100-1111", "sender");
-		member(store, "9101-2222", "focused", { hidden: true });
+		member(store, "9101-2222", "focused", { muted: true });
 
 		const res = store.resolve("focused", me.key);
 		assert.equal(res.ok, false);
-		assert.equal(res.ok === false && res.reason, "none");
-		assert.equal(store.resolveIdle("focused", me.key).ok, false, "派工路径同样选不中");
+		assert.equal(res.ok === false && res.reason, "muted");
+		assert.equal(res.ok === false && res.candidates[0]?.name, "focused");
+		const idle = store.resolveIdle("focused", me.key);
+		assert.equal(idle.ok === false && idle.reason, "muted", "派工路径同样拒");
 	});
 
-	it("隐身成员自己给自己发也照样报 self", () => {
+	it("专注成员自己给自己发也照样报 self", () => {
 		const store = freshStore();
-		member(store, "9200-1111", "focused", { hidden: true });
+		member(store, "9200-1111", "focused", { muted: true });
 		const res = store.resolve("focused", "9200-1111");
 		assert.equal(res.ok === false && res.reason, "self");
 	});
 
-	it("deliverTo 投不进隐身会话的收件箱", () => {
+	it("deliverTo 不往专注成员的收件箱写", () => {
 		const store = freshStore();
-		member(store, "9300-1111", "focused", { hidden: true });
+		member(store, "9300-1111", "focused", { muted: true });
 
 		const result = store.deliverTo("focused", { from: "s", fromName: "扫描器", text: "该你了" });
 		assert.equal(result.ok, false);
-		assert.equal(result.ok === false && result.reason, "none");
-		assert.equal(store.drain("9300-1111").length, 0);
+		assert.equal(result.ok === false && result.reason, "muted");
+		assert.match(result.ok === false ? result.detail : "", /专注中/);
+		assert.equal(store.drain("9300-1111").length, 0, "拒发就是不写，不靠收件箱堆积");
 	});
 
-	it("跨项目寻址一样看不到隐身的会话", () => {
+	it("跨项目寻址看得到，投不进", () => {
 		const { a, b } = crossPair();
 		member(a, "9400-1111", "me");
-		member(b, "9401-2222", "hidden-owner", { hidden: true, project: "proj-b" });
+		member(b, "9401-2222", "focused-owner", { muted: true, project: "proj-b" });
 
-		assert.equal(a.resolveScoped("proj-b", "hidden-owner", "9400-1111").ok, false);
-		assert.equal(a.resolveScoped("proj-b", "hidden-owner", "9400-1111").candidates.length, 0);
+		const res = a.resolveScoped("proj-b", "focused-owner", "9400-1111");
+		assert.equal(res.ok, false);
+		assert.equal(res.ok === false && res.reason, "muted");
+		assert.equal(res.ok === false && res.candidates[0]?.name, "focused-owner");
 	});
 });
 

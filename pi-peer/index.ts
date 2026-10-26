@@ -700,6 +700,10 @@ export default function (pi: ExtensionAPI) {
 	/** 解析失败时给一句能自救的提示：项目不存在与名字不存在是两种错 */
 	function resolveHint(to: string, res: Extract<ResolveResult, { ok: false }>): string {
 		if (res.reason === "self") return "目标是你自己，不能发给自己。";
+		if (res.reason === "muted") {
+			const who = res.candidates[0]?.name ?? to;
+			return `${who} 专注中，不接收消息，没发出（没有写进收件箱）。等它退出专注再发，或先做不依赖它回应的事。`;
+		}
 		if (res.reason === "hidden") {
 			const who = res.candidates[0]?.name ?? to;
 			const me = self?.role ? `你的角色是 ${self.role}` : "当前会话没有角色";
@@ -787,14 +791,18 @@ export default function (pi: ExtensionAPI) {
 			const render = (m: Member, live: boolean, label: string, isSelf = false, withActivity = false) => {
 				const age = Math.round((Date.now() - m.lastSeen) / 1000);
 				const tag = isSelf
-					? m.hidden
-						? "（我·专注中，其他会话看不到）"
+					? m.muted
+						? "（我·专注中，不收消息）"
 						: m.role
 							? `（我，角色：${m.role}）`
 							: "（我）"
-					: m.role
-						? `（角色：${m.role}）`
-						: "";
+					: m.muted
+						? m.role
+							? `（角色：${m.role}·专注中，不收消息）`
+							: "（专注中，不收消息）"
+						: m.role
+							? `（角色：${m.role}）`
+							: "";
 				// 待切：已受理、等这一轮结束后才生效的角色分配，派工方看到就别把它当已切换
 				const pending = m.pendingRole ? `·待切 ${m.pendingRole.role}` : "";
 				const head =
@@ -856,6 +864,41 @@ export default function (pi: ExtensionAPI) {
 
 			return text(
 				`已写入 ${res.member.name} 的收件箱｜id=${msg.id}｜steer，在对方这一轮的工具返回后插入；写入收件箱不代表已处理`,
+			);
+		},
+	});
+
+	pi.registerTool({
+		name: "peer_focus",
+		label: "Peer Focus",
+		description:
+			"本会话自己进出专注模式：专注中其他会话照常看得到你，但消息被直接拒发（不写收件箱），派工与工单交接也会跳过你。省略 on 表示进入，on=false 表示退出。",
+		promptSnippet: "自己进出专注模式（可见但拒收消息）",
+		promptGuidelines: [
+			"要连续做完一段不需要别人插话的工作时用 peer_focus；一直持续到自己发出一条消息（peer_send / /peer-send）或显式传 on=false，不会自动到期。",
+			"专注中被拒的消息不会进对方的重试队列：需要对方补发的，退出后自己主动去要。",
+		],
+		parameters: Type.Object({
+			on: Type.Optional(
+				Type.Boolean({
+					description: "true 或省略=进入专注；false=退出专注，并把进入前已积压在收件箱的消息投进来",
+				}),
+			),
+		}),
+		async execute(_toolCallId, params) {
+			if (!store || !self) return text("pi-peer 未启用（未注册成功）");
+			const on = params.on !== false;
+			if (on === focused)
+				return text(
+					on
+						? "已在专注模式：你仍然可见，但消息会被拒发｜发出一条消息或 peer_focus(false) 退出"
+						: "当前不在专注模式",
+				);
+			setFocus(on);
+			return text(
+				on
+					? "已进入专注模式｜其他会话仍看得到你，消息会被拒发；发出一条消息或 peer_focus(false) 退出"
+					: "已退出专注模式｜进入前积压在收件箱的消息会补投",
 			);
 		},
 	});
@@ -1021,6 +1064,8 @@ export default function (pi: ExtensionAPI) {
 		if (!store || !self) return reply(false, "该会话没启用 pi-peer");
 		const skipped: string[] = [];
 		for (const target of targets) {
+			// 工单交接指名到本会话时不走解析（否则会被当成「发给自己」拒掉）。专注中照收：
+			// 拒掉这一条会让台账按租约反复重投；信落在箱里，退出专注后补投。
 			const resolved =
 				request.handoff && target === self.name
 					? { ok: true as const, member: self, bucket: store.dir, live: true }
@@ -1028,8 +1073,10 @@ export default function (pi: ExtensionAPI) {
 						? store.resolveIdle(target, self.key)
 						: resolveTarget(target);
 			if (!resolved.ok) {
-				// 在忙、离线、隐身要分开报：前者等一等就好，后者得换人
+				// 在忙、隐身、专注要分开报：前者等一等就好，隐身得换人，专注得等它退出
 				if (resolved.reason === "busy") skipped.push(`${resolved.candidates[0]?.name ?? target} 在忙`);
+				else if (resolved.reason === "muted")
+					skipped.push(`${resolved.candidates[0]?.name ?? target} 专注中，不接收消息`);
 				else if (resolved.reason === "hidden") skipped.push(`${resolved.candidates[0]?.name ?? target} 对你隐身`);
 				continue;
 			}
@@ -1304,7 +1351,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("peer-focus", {
-		description: "进入/退出专注模式：进入后对其他会话隐身、不接收消息，自己发出一条消息后自动退出（off 手动退出）",
+		description:
+			"进入/退出专注模式：进入后其他会话仍看得到，但消息被拒发、不写收件箱；自己发出一条消息后自动退出（off 手动退出）",
 		handler: async (args, ctx) => {
 			if (!store || !self) {
 				ctx.ui.notify("pi-peer 未启用", "warning");
@@ -1611,13 +1659,14 @@ function refreshStatus(): void {
 /**
  * 进入/退出专注模式。
  *
- * 进入时把自己标成 hidden（别的会话在列表、解析、投递里都看不到）并停掉收件箱投递；
- * 退出时恢复可见并把专注期间积压的消息投进来。
+ * 进入时把自己标成 muted：别的会话照常在列表里看得见、也寻得到，但投递被直接拒发；
+ * 收件箱同时也停取（进入前已经写进来的信留在原地，退出后补投）。
+ * 不隐身：隐身会让发送方看不出是「不收」还是「不在」，只能换个名字重试。
  */
 function setFocus(on: boolean, reason?: string): void {
 	if (!store || !self || focused === on) return;
 	focused = on;
-	self.hidden = on ? true : undefined;
+	self.muted = on ? true : undefined;
 	try {
 		store.register(self);
 	} catch {
@@ -1627,7 +1676,7 @@ function setFocus(on: boolean, reason?: string): void {
 	const ui = ctxRef?.hasUI ? ctxRef.ui : undefined;
 	if (on) {
 		ui?.notify(
-			"已进入专注模式：其他会话看不到这个会话，也不再收到消息；自己发出一条消息后自动退出（/peer-focus off 手动退出）",
+			"已进入专注模式：其他会话仍看得到这个会话，但消息会被拒发；自己发出一条消息后自动退出（/peer-focus off 手动退出）",
 			"info",
 		);
 		return;
@@ -1655,7 +1704,8 @@ function selfBusy(): boolean {
  * 忙时也取走投递，不留待取窗口。
  */
 async function drainAndDeliver(): Promise<void> {
-	// 专注期间不取收件箱：消息留在 pending，退出后再投；也不唤醒本轮
+	// 专注期间不取收件箱：进入专注前已经写进来的信留在 pending，退出后再投；也不唤醒本轮。
+	// 进入之后的消息在发送方就被拒了（store.rejectMuted），这里只兜「进入那一刻已经在箱里」的信。
 	if (focused || draining || !store || !self) return;
 	draining = true;
 	const activeStore = store;

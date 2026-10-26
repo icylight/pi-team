@@ -273,6 +273,8 @@ export function registerSessionControl(pi: ExtensionAPI, deps: Dependencies) {
 			if (!runtime || !deps.canStart(runtime.member.role)) throw new Error("当前角色没有 canStartSessions 权限");
 			if (!params.task.trim() || params.task.length > MAX_TEXT) throw new Error("任务正文为空或超出长度限制");
 			const target = deps.resolve(params.to);
+			if (!target.ok && target.reason === "muted")
+				throw new Error(`${target.candidates[0]?.name ?? params.to} 专注中，不接收消息`);
 			if (!target.ok || !target.live) throw new Error("目标不在线、找不到或不唯一，请重新 peer_list");
 			if (target.bucket !== runtime.store.dir || target.member.key === runtime.member.key)
 				throw new Error("只允许同项目其他会话");

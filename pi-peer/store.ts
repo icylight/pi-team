@@ -78,8 +78,11 @@ export interface Member {
 	busy?: boolean;
 	/** 这一轮什么时候开始的：busy 卡住（中断没触发 agent_end）时按超时兜底 */
 	busySince?: number;
-	/** 专注模式（/peer-focus）：对其他会话隐身。别的会话在列表、解析与投递里都看不到它 */
-	hidden?: boolean;
+	/**
+	 * 专注模式（/peer-focus）：照常在列表里出现，但投递直接拒发。
+	 * 不隐藏自己——隐身会让发送方看不出是「不收」还是「不在」，只能换个名字重试。
+	 */
+	muted?: boolean;
 	/**
 	 * 项目内可见范围：非空时该角色隐身，只有名单里的基础角色看得见它、能给它发消息。
 	 * 注册时从项目配置算好写进来，发现方不必读对方的配置文件。
@@ -145,7 +148,7 @@ export type ResolveResult =
 	| { ok: true; member: Member; bucket: string; live: boolean }
 	| {
 			ok: false;
-			reason: "self" | "none" | "ambiguous" | "offline" | "busy" | "hidden";
+			reason: "self" | "none" | "ambiguous" | "offline" | "busy" | "hidden" | "muted";
 			candidates: Member[];
 			/** 仅跨项目解析失败时给：本机在线的项目标签，用于「没有这个项目」的提示 */
 			projects?: string[];
@@ -600,7 +603,7 @@ export class PeerStore {
 		return [...live, ...stale].sort((a, b) => (a.member.startedAt ?? 0) - (b.member.startedAt ?? 0));
 	}
 
-	/** 本项目桶的成员，带存活标记。专注与可见范围的过滤都在 visibleToViewer 里 */
+	/** 本项目桶的成员，带存活标记。可见范围过滤在 visibleToViewer 里；专注中的成员照常列出 */
 	listScoped(opts: { includeStale?: boolean; selfKey?: string } = {}): ScopedMember[] {
 		return visibleToViewer(this.readBucket(this.dir), opts.selfKey).filter((s) => opts.includeStale || s.live);
 	}
@@ -689,7 +692,7 @@ export class PeerStore {
 		if (members.some((s) => s.member.key === selfKey && matchesQuery(s.member, q))) {
 			return { ok: false, reason: "self", candidates: [] };
 		}
-		return this.withHiddenBucket(this.pickLive(members, q, selfKey), bucket, q, selfKey);
+		return this.rejectMuted(this.withHiddenBucket(this.pickLive(members, q, selfKey), bucket, q, selfKey));
 	}
 
 	/** 只在空闲的在线成员里解析：派工走它，避免 steer 插进别人正在做的事 */
@@ -701,7 +704,7 @@ export class PeerStore {
 		if (members.some((s) => s.member.key === selfKey && matchesQuery(s.member, q))) {
 			return { ok: false, reason: "self", candidates: [] };
 		}
-		return this.withHiddenBucket(this.pickLive(members, q, selfKey, true), bucket, q, selfKey);
+		return this.rejectMuted(this.withHiddenBucket(this.pickLive(members, q, selfKey, true), bucket, q, selfKey));
 	}
 
 	/**
@@ -733,7 +736,7 @@ export class PeerStore {
 			return { ok: false, reason: "none", candidates: [], projects };
 		}
 		const hit = this.pickLive(inProject, q, selfKey);
-		if (hit.ok || hit.reason !== "none") return hit;
+		if (hit.ok || hit.reason !== "none") return this.rejectMuted(hit);
 		const blocked = blockedIn();
 		return blocked ? { ok: false, reason: "hidden", candidates: [blocked] } : hit;
 	}
@@ -748,14 +751,21 @@ export class PeerStore {
 		return blocked ? { ok: false, reason: "hidden", candidates: [blocked] } : hit;
 	}
 
-	/** 只算被 visibleTo 挡掉的（专注模式的隐身仍按「找不到」处理） */
+	/** 只算被 visibleTo 挡掉的（专注不隐身，不算在这里） */
 	private blockedMatch(members: ScopedMember[], q: string, selfKey: string): Member | undefined {
 		const viewer = members.find((s) => s.member.key === selfKey);
-		const blocked = members.filter(
-			(s) => s.member.key !== selfKey && s.live && !s.member.hidden && !canSee(viewer, s),
-		);
+		const blocked = members.filter((s) => s.member.key !== selfKey && s.live && !canSee(viewer, s));
 		const hit = this.pick(blocked, q, selfKey);
 		return hit.ok ? hit.member : undefined;
+	}
+
+	/**
+	 * 专注中的会话看得见、寻得到，但投不进去：在这里把命中改成拒发。
+	 * 投递只走 resolve 系列，所以 peer_send、派工、交接、代投都不必各写一遍判断。
+	 */
+	private rejectMuted(hit: ResolveResult): ResolveResult {
+		if (!hit.ok || !hit.member.muted) return hit;
+		return { ok: false, reason: "muted", candidates: [hit.member] };
 	}
 
 	/**
@@ -816,9 +826,11 @@ export class PeerStore {
 					? `${who || target} 不在线`
 					: resolved.reason === "busy"
 						? `${who || target} 正在跑一轮，跳过`
-						: resolved.reason === "ambiguous"
-							? `名字不唯一：${who}`
-							: `找不到「${target}」`;
+						: resolved.reason === "muted"
+							? `${who || target} 专注中，不接收消息`
+							: resolved.reason === "ambiguous"
+								? `名字不唯一：${who}`
+								: `找不到「${target}」`;
 			return { ok: false, reason: resolved.reason, detail };
 		}
 		const id = newMessageId();
@@ -1022,15 +1034,13 @@ export function isBusy(member: Member): boolean {
 }
 
 /**
- * 隐身判据：两条规则在同一个函数里判，列表、解析、投递不再各写一遍。
+ * 可见性判据只在 canSee 里判，列表与解析不再各写一遍。
  *
- * - 专注模式（hidden）：只对本人可见。不是另报一个「专注中」状态——隐身的用处就是让派工方
- *   根本选不中它，而不是看到一个要额外判断的强提示。
- * - 可见范围（visibleTo）：设了名单的角色只对**同一个桶里**名单中的基础角色可见，其余会话看不到、
- *   也解析不到。跨项目不因为同名角色而被当成名单里的人；浏览方没角色时一律看不见。
+ * 可见范围（visibleTo）：设了名单的角色只对**同一个桶里**名单中的基础角色可见，其余会话看不到、
+ * 也解析不到。跨项目不因为同名角色而被当成名单里的人；浏览方没角色时一律看不见。
+ * 专注模式不在这里：它对所有会话可见，只在投递时被 rejectMuted 挡掉。
  */
 function canSee(viewer: ScopedMember | undefined, target: ScopedMember): boolean {
-	if (target.member.hidden) return false;
 	const allow = target.member.visibleTo;
 	if (!allow?.length) return true;
 	const viewerRole = viewer?.member.role?.trim();

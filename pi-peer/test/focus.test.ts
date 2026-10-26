@@ -1,5 +1,5 @@
 /**
- * /peer-focus 专注模式：对外隐身、不接收消息，自己发出一条后自动退出。
+ * /peer-focus 专注模式：仍然可见，但消息被拒发；自己发出一条后自动退出。
  *
  * 用与 peer-role-command.test.ts 同款的 mock pi；这里额外捕获 sendMessage，
  * 好判断消息有没有真的投进会话。
@@ -80,8 +80,43 @@ function memberFiles(root: string, cwd: string): string[] {
 	}
 }
 
-function hiddenCount(root: string, cwd: string): number {
-	return memberFiles(root, cwd).filter((f) => JSON.parse(fs.readFileSync(f, "utf8")).hidden === true).length;
+test("发给专注中的同伴直接拒发，并说明原因", async () => {
+	const h = harness();
+	try {
+		const store = new PeerStore(h.root, h.cwd);
+		store.ensure("7999-eeee");
+		store.register({
+			key: "7999-eeee",
+			name: "busy-peer",
+			model: "test/model",
+			pid: process.pid,
+			cwd: h.cwd,
+			muted: true,
+			messageProtocol: 1,
+			startedAt: Date.now(),
+			lastSeen: Date.now(),
+		});
+		await h.handlers.get("session_start")!({}, h.ctx);
+
+		const sent = JSON.stringify(
+			await h.tools
+				.get("peer_send")
+				.execute("synthetic", { to: "busy-peer", text: "在吗" }, undefined, undefined, h.ctx),
+		);
+		assert.match(sent, /专注中，不接收消息/, "拒发要带上原因，不能报成找不到");
+		assert.equal(store.drain("7999-eeee").length, 0, "没写进收件箱");
+
+		const listed = JSON.stringify(
+			await h.tools.get("peer_list").execute("synthetic", {}, undefined, undefined, h.ctx),
+		);
+		assert.match(listed, /busy-peer（专注中，不收消息）/, "列表里看得出它只是不收");
+	} finally {
+		h.handlers.get("session_shutdown")?.();
+	}
+});
+
+function mutedCount(root: string, cwd: string): number {
+	return memberFiles(root, cwd).filter((f) => JSON.parse(fs.readFileSync(f, "utf8")).muted === true).length;
 }
 
 /** 同项目里另一个会话；专注用例拿它当「别人」的视角 */
@@ -101,31 +136,48 @@ function peerSession(root: string, cwd: string, key: string, name: string): Peer
 	return store;
 }
 
-test("进入专注模式后对其他会话隐身，退出后恢复", async () => {
+test("进入专注后别人仍看得见，但解析与被投递都被拒", async () => {
 	const h = harness();
 	try {
+		peerSession(h.root, h.cwd, "7700-aaaa", "helper");
 		await h.handlers.get("session_start")!({}, h.ctx);
 		await h.commands.get("peer-focus")!.handler("", h.ctx);
 
-		assert.equal(hiddenCount(h.root, h.cwd), 1, "自己标成隐身");
+		assert.equal(mutedCount(h.root, h.cwd), 1, "自己标成 muted");
 		assert.match(h.notes.at(-1)!, /已进入专注模式/);
-		assert.equal(
-			new PeerStore(h.root, h.cwd).listMembers({ includeStale: true }).length,
-			0,
-			"别的会话列表里看不到它",
+
+		const outsider = new PeerStore(h.root, h.cwd);
+		assert.ok(
+			outsider
+				.listMembers({ includeStale: true })
+				.map((m) => m.name)
+				.includes("focused-session"),
+			"别人列表里仍然看得到——隐身会让发送方以为掉线",
 		);
-		assert.equal(memberFiles(h.root, h.cwd).length, 1, "注册文件还在，只是被别人过滤掉——不是假装掉线");
+		const seen = outsider.resolve("focused-session", "7700-aaaa");
+		assert.equal(seen.ok === false && seen.reason, "muted", "寻得到，但报「专注中」而不是「找不到」");
+		const delivered = outsider.deliverTo("focused-session", { from: "7700-aaaa", fromName: "helper", text: "在吗" });
+		assert.equal(delivered.ok, false, "拒发");
+		assert.equal(
+			new PeerStore(h.root, h.cwd).drain(
+				memberFiles(h.root, h.cwd)[0]
+					.split("/")
+					.pop()!
+					.replace(/\.json$/, ""),
+			).length,
+			0,
+			"被拒的消息不写进收件箱",
+		);
 
 		await h.commands.get("peer-focus")!.handler("off", h.ctx);
-		assert.equal(hiddenCount(h.root, h.cwd), 0);
-		assert.equal(new PeerStore(h.root, h.cwd).listMembers({ includeStale: true }).length, 1);
+		assert.equal(mutedCount(h.root, h.cwd), 0);
 		assert.match(h.notes.at(-1)!, /已退出专注模式/);
 	} finally {
 		h.handlers.get("session_shutdown")?.();
 	}
 });
 
-test("专注期间不投消息，退出后补投", async () => {
+test("专注期间不取收件箱：进入前积压的消息退出后补投", async () => {
 	const h = harness();
 	try {
 		await h.handlers.get("session_start")!({}, h.ctx);
@@ -134,9 +186,8 @@ test("专注期间不投消息，退出后补投", async () => {
 
 		// 模拟进入专注前已经落进收件箱、还没来得及取的一条消息
 		const store = new PeerStore(h.root, h.cwd);
-		const id = newMessageId();
 		store.send({
-			id,
+			id: newMessageId(),
 			from: "7700-aaaa",
 			fromName: "helper",
 			to: selfKey,
@@ -161,20 +212,20 @@ test("自己发出一条消息后自动退出专注", async () => {
 		peerSession(h.root, h.cwd, "7800-bbbb", "helper");
 		await h.handlers.get("session_start")!({}, h.ctx);
 		await h.commands.get("peer-focus")!.handler("", h.ctx);
-		assert.equal(hiddenCount(h.root, h.cwd), 1);
+		assert.equal(mutedCount(h.root, h.cwd), 1);
 
 		const res = await h.tools
 			.get("peer_send")
 			.execute("synthetic", { to: "helper", text: "在吗" }, undefined, undefined, h.ctx);
 		assert.match(JSON.stringify(res), /已写入 helper/);
-		assert.equal(hiddenCount(h.root, h.cwd), 0, "发出消息即恢复可见");
+		assert.equal(mutedCount(h.root, h.cwd), 0, "发出消息即恢复接收");
 		assert.match(h.notes.join("\n"), /已退出专注模式（已发出消息）/);
 	} finally {
 		h.handlers.get("session_shutdown")?.();
 	}
 });
 
-test("代其他扩展投递不算自己开口，不解除专注", async () => {
+test("系统代投不算自己开口，专注保持", async () => {
 	const h = harness();
 	try {
 		peerSession(h.root, h.cwd, "7950-dddd", "helper");
@@ -182,16 +233,15 @@ test("代其他扩展投递不算自己开口，不解除专注", async () => {
 		await h.commands.get("peer-focus")!.handler("", h.ctx);
 
 		h.bus.get("peer:deliver")!({ id: "wake-1", targets: ["helper"], text: "该你了" });
-
-		const reply = h.emitted.find((e) => e.name === "peer:deliver:result")?.data as { ok?: boolean } | undefined;
-		assert.equal(reply?.ok, true, "代投本身应该成功");
-		assert.equal(hiddenCount(h.root, h.cwd), 1, "系统代投不该把会话从专注模式里叫出来");
+		const toOther = h.emitted.find((e) => e.name === "peer:deliver:result")?.data as { ok?: boolean } | undefined;
+		assert.equal(toOther?.ok, true, "代投别人的消息照常成功");
+		assert.equal(mutedCount(h.root, h.cwd), 1, "系统代投不该把会话从专注模式里叫出来");
 	} finally {
 		h.handlers.get("session_shutdown")?.();
 	}
 });
 
-test("专注时 peer_list 里自己带专注标记，别人照常列", async () => {
+test("专注时 peer_list 里自己带不收消息标记，别人照常列", async () => {
 	const h = harness();
 	try {
 		peerSession(h.root, h.cwd, "7900-cccc", "helper");
@@ -199,8 +249,30 @@ test("专注时 peer_list 里自己带专注标记，别人照常列", async () 
 		await h.commands.get("peer-focus")!.handler("", h.ctx);
 
 		const res = JSON.stringify(await h.tools.get("peer_list").execute("synthetic", {}, undefined, undefined, h.ctx));
-		assert.match(res, /我·专注中/);
+		assert.match(res, /我·专注中，不收消息/);
 		assert.match(res, /helper/);
+	} finally {
+		h.handlers.get("session_shutdown")?.();
+	}
+});
+
+test("peer_focus 工具能自己进出专注", async () => {
+	const h = harness();
+	try {
+		await h.handlers.get("session_start")!({}, h.ctx);
+		const tool = h.tools.get("peer_focus");
+		assert.ok(tool, "工具已注册");
+
+		const enter = await tool.execute("synthetic", {}, undefined, undefined, h.ctx);
+		assert.match(JSON.stringify(enter), /已进入专注模式/);
+		assert.equal(mutedCount(h.root, h.cwd), 1);
+
+		const again = await tool.execute("synthetic", {}, undefined, undefined, h.ctx);
+		assert.match(JSON.stringify(again), /已在专注模式/);
+
+		const leave = await tool.execute("synthetic", { on: false }, undefined, undefined, h.ctx);
+		assert.match(JSON.stringify(leave), /已退出专注模式/);
+		assert.equal(mutedCount(h.root, h.cwd), 0);
 	} finally {
 		h.handlers.get("session_shutdown")?.();
 	}
